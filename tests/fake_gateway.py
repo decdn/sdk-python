@@ -258,6 +258,8 @@ class FakeGateway:
         self.truncated: set[str] = set()
         # Hashes answered 206 with their first byte, whatever the request asked: a lying gateway.
         self.partial: set[str] = set()
+        # Sized hashes answered whole with 200, whatever Range the request carried.
+        self.whole: set[str] = set()
         # Loopback capability scopes registered: `example.com`, `*.example.com`, `*`.
         self.scopes: list[str] = []
         # Namespace pointers: namespace id → bundle hash.
@@ -786,7 +788,7 @@ class FakeGateway:
         to chunk groups) does not fit what is left of the allowance, and it is charged that.
         """
         headers["accept-ranges"] = "bytes"
-        w = _window(range_, size)
+        w = None if hash_ in self.whole else _window(range_, size)
         if w == "unsatisfiable":
             return _text(416, "range not satisfiable\n", {"content-range": f"bytes */{size}"})
         billable = size if w is None else _group_span(w, size)

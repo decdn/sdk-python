@@ -282,6 +282,49 @@ async def test_retry_cap_refuses_long_wait(flavour: Driver, monkeypatch: pytest.
     assert len(fake.seen) == 1
 
 
+async def test_a_ranged_request_answered_200_is_a_whole_body(flavour: Driver) -> None:
+    fake = FakeGateway("public")
+    data = bytes(range(40))
+    bundle = fake.add_bundle({"big.bin": data})
+    fake.whole.add(entry_of(bundle, "big.bin").hash)
+    c = await flavour.open(fake)
+    r = await c.get(f"decdn:{bundle.hash}/big.bin", range=ByteRange(offset=10, length=20))
+    assert r.status == 200
+    # A ranged plan carries no hash (it reads no manifest), so the whole body comes back unhashed.
+    assert r.verified == "skipped"
+    assert await c.read(r) == data
+
+
+async def test_retry_never_sleeps_without_retry_after(
+    flavour: Driver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for retry in (True, 5.0):
+        fake, _, blob = public_fake(0)
+
+        def handle(request: httpx.Request, fake: FakeGateway = fake) -> httpx.Response:
+            fake.handle(request)
+            return body(402, b"pay", {})
+
+        waits = on_sleep(monkeypatch, flavour)
+        c = await flavour.open(fake, transport=via(handle))
+        await rejects(c.get(f"decdn:{blob}", retry=retry), "PAYMENT_REQUIRED")
+        assert waits == []
+        assert len(fake.seen) == 1
+
+
+async def test_float_cap_retries_when_retry_after_fits(
+    flavour: Driver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, _, blob = public_fake()
+    fake.unfunded.add(blob)
+    waits = on_sleep(monkeypatch, flavour, lambda _: fake.unfunded.discard(blob))
+    c = await flavour.open(fake)
+    r = await c.get(f"decdn:{blob}", retry=120.0)
+    assert await c.text(r) == "other bytes"
+    assert waits == [60]
+    assert len(fake.seen) == 2
+
+
 async def test_fails_a_window_that_runs_past_its_declared_length_with_truncated(flavour: Driver) -> None:
     fake, bundle, _ = public_fake()
 
@@ -720,3 +763,15 @@ async def test_async_cancelled_waiter_leaves_the_shared_read_running() -> None:
             await first
         assert await c.manifest(bundle.hash) is m
     assert asked == [f"{fake.url}/{bundle.hash}"]
+
+
+async def test_loopback_client_ignores_proxy_env(flavour: Driver, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
+    fake, _, blob = loopback_fake()
+    c = await open_loop(flavour, fake)
+    assert await c.text(await c.get(f"decdn:{blob}")) == "loop bytes"
+    # `_http` is the client's private httpx client: its `trust_env` decides whether proxy variables apply.
+    assert c.client._http.trust_env is False
+    public, _, _ = public_fake()
+    assert (await flavour.open(public)).client._http.trust_env is True

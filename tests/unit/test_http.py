@@ -77,3 +77,11 @@ def test_is_success() -> None:
 def test_error_of_ignores_non_ascii_digits() -> None:
     err = error_of(429, httpx.Headers({"retry-after": "٣"}, encoding="utf-8"), "")
     assert err.retry_after_secs is None
+
+
+def test_error_of_ignores_negative_retry_after() -> None:
+    err = error_of(
+        429, httpx.Headers({"content-type": "application/json"}), '{"error":"slow","retry_after_secs":-5}'
+    )
+    assert err.retry_after_secs is None
+    assert error_of(429, httpx.Headers({"retry-after": "-5"}), "").retry_after_secs is None

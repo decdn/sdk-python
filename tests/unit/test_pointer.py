@@ -82,6 +82,16 @@ def test_normalises_a_wallets_high_s_0_1_v_signature_to_low_s_27_28() -> None:
     assert sign_pointer(domain, pointer, Wallet()) == fixture["signature"]
 
 
+def test_recover_rejects_high_s_and_bad_v() -> None:
+    sig = fixture["signature"][2:]
+    r, s, v = sig[:64], int(sig[64:128], 16), sig[128:]
+    assert recover_pointer_signer(domain, pointer, f"0x{sig}") == fixture["address"].lower()
+    for bad in (f"0x{r}{N - s:064x}{v}", f"0x{r}{s:064x}00", f"0x{r}{s:064x}1d", f"0x{sig[:128]}"):
+        with pytest.raises(DecdnError) as info:
+            recover_pointer_signer(domain, pointer, bad)
+        assert info.value.code == "UNPROCESSABLE"
+
+
 def gateway() -> FakeGateway:
     fake = FakeGateway("public")
     fake.pointer_domain = domain

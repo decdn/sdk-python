@@ -92,7 +92,7 @@ bundles and their manifests are
 
 ## Compatibility
 
-Python 3.11 or later.
+Python 3.11 or later. Python 3.14 is not yet supported: coincurve ships no 3.14 wheels; the matrix grows when it does.
 
 Two floors in `pyproject.toml` (`[tool.decdn]`) say which `decdn gateway`
 releases the SDK works against:

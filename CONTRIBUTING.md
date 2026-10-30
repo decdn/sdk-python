@@ -30,7 +30,7 @@ to the hand-written `## [Unreleased]` section of `CHANGELOG.md`; after it,
 never edit `CHANGELOG.md` by hand.
 
 Install the git hooks once with `uv run pre-commit install --install-hooks
---hook-type pre-commit --hook-type commit-msg` (or `pipx run pre-commit ...`).
+--hook-type pre-commit --hook-type commit-msg`.
 `pre-commit` runs ruff and ruff-format on the staged files and zizmor on the
 workflows; `commit-msg` checks the message is a Conventional Commit
 (`.pre-commit-config.yaml`). `git commit --no-verify` skips them for one

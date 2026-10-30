@@ -74,7 +74,7 @@ def error_of(status: int, headers: httpx.Headers, body: str) -> DecdnError:
             if isinstance(parsed.get("uri"), str):
                 details["fallback_uri"] = parsed["uri"]
             secs = parsed.get("retry_after_secs")
-            if isinstance(secs, int) and not isinstance(secs, bool):
+            if isinstance(secs, int) and not isinstance(secs, bool) and secs >= 0:
                 details["retry_after_secs"] = secs
         if parsed is not None:
             # A u64 `seq` is read from its digits, as the gateway wrote it.

@@ -48,6 +48,10 @@ __all__ = [
 ]
 
 
+# The longest a retry waits, whatever the gateway asks.
+MAX_RETRY_WAIT_SECS = 86_400
+
+
 class Client:
     """A synchronous client over a gateway.
 
@@ -84,7 +88,13 @@ class Client:
         self.pointer: PointerApi = PointerApi(self)
         # The delegate and capability API (loopback gateway).
         self.loopback: LoopbackApi = LoopbackApi(self)
-        self._http = httpx.Client(transport=transport, timeout=timeout, follow_redirects=True)
+        # A loopback request carries the token: it never goes through a proxy from the environment.
+        self._http = httpx.Client(
+            transport=transport,
+            timeout=timeout,
+            follow_redirects=True,
+            trust_env=self.context != "loopback",
+        )
 
     def auth_headers(self) -> dict[str, str]:
         """Return the headers every bare-host request carries."""
@@ -120,7 +130,7 @@ class Client:
             wait = retry_wait(e, retry)
             if wait is None:
                 raise
-            time.sleep(wait)
+            time.sleep(min(wait, MAX_RETRY_WAIT_SECS))
         return self._send(url, "GET", headers)
 
     def site_url(self, uri: str | DecdnUri) -> str:
@@ -262,7 +272,13 @@ class AsyncClient:
         self.pointer: AsyncPointerApi = AsyncPointerApi(self)
         # The delegate and capability API (loopback gateway).
         self.loopback: AsyncLoopbackApi = AsyncLoopbackApi(self)
-        self._http = httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True)
+        # A loopback request carries the token: it never goes through a proxy from the environment.
+        self._http = httpx.AsyncClient(
+            transport=transport,
+            timeout=timeout,
+            follow_redirects=True,
+            trust_env=self.context != "loopback",
+        )
         # Manifest reads in flight, by hash: every caller of one hash awaits the same read.
         self._pending: dict[str, asyncio.Task[BundleManifest]] = {}
 
@@ -300,7 +316,7 @@ class AsyncClient:
             wait = retry_wait(e, retry)
             if wait is None:
                 raise
-            await asyncio.sleep(wait)
+            await asyncio.sleep(min(wait, MAX_RETRY_WAIT_SECS))
         return await self._send(url, "GET", headers)
 
     def site_url(self, uri: str | DecdnUri) -> str:

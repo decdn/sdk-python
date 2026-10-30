@@ -7,3 +7,17 @@ is hand-written. The format is based on [Keep a Changelog](https://keepachangelo
 and the package follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+### Added
+
+- `Client` and `AsyncClient` over a public or loopback `decdn gateway`, with `get`, `head`, `resolve`, `manifest`, `site_url` and `namespace_url`
+- Verified streaming: a blob or whole bundle entry is hashed with BLAKE3 as it streams, and a mismatch raises `HASH_MISMATCH` or `TRUNCATED`
+- Bundle manifests, parsed, verified and cached per client
+- Byte ranges of sized entries, with `content_range` on the response
+- `retry` on `get` waits out one `Retry-After`, optionally capped in seconds
+- Loopback gateway API: `delegate`, `register_capability` and `capabilities`, plus `parse_capability` for `dcap1:` tokens
+- `read_loopback_token` and `default_data_dir` in `decdn.local`
+- Namespace pointers: `client.pointer.set`, signed with a raw key or a `sign_typed_data` signer, and `pointer_typed_data`, `pointer_signing_hash`, `sign_pointer` and `recover_pointer_signer`
+- `parse_uri`, `format_uri`, `hash_to_base32`, `base32_to_hash`, `blake3_hex` and `create_blake3`
+- `DecdnError` with 19 stable codes
+- Typed package (`py.typed`) for Python 3.11 to 3.14

@@ -10,7 +10,8 @@ a state directory:
 - `uv` logs each call; `build` writes an empty sdist and wheel into `dist/`, and
   `publish` without `--dry-run` puts each file it is given on the stub PyPI;
 - `curl` answers PyPI's JSON API from that stub, with a 404 when it lacks the version,
-  or fails to reach it when $PS_PYPI is `down`;
+  fails to reach it when $PS_PYPI is `down`, or answers 200 with a body that is not
+  JSON when it is `garbled`;
 - `gh` answers the repo's push permission with $PS_PUSH, `release view` from the stub
   releases (a draft when $PS_GH is `draft`, a failure when it is `down`), and
   `release create` records the release and its notes (or fails when $PS_GH is
@@ -55,7 +56,10 @@ done
 [[ "${args[-1]}" =~ ^https://pypi\.org/pypi/decdn/([^/]+)/json$ ]] || exit 1
 version="${BASH_REMATCH[1]}"
 files="$(grep -E "^decdn-${version//./\\.}[-.]" "$PS_STATE/pypi" 2>/dev/null || true)"
-if [[ -n "$files" ]]; then
+if [[ "${PS_PYPI:-}" == garbled ]]; then
+  echo "not json" > "$out"
+  printf 200
+elif [[ -n "$files" ]]; then
   python3 -c 'import json, sys
 urls = [{"filename": f, "digests": {"sha256": "stub-" + f}} for f in sys.argv[1:]]
 print(json.dumps({"urls": urls}))' $files > "$out"
@@ -270,6 +274,15 @@ def test_finishes_a_run_whose_github_release_failed(publish: Publish) -> None:
     assert "stub-decdn-0.2.0.tar.gz" in r.stdout
     assert len(publish.uploaded()) == 1
     assert publish.read("release-v0.2.0") == "false\n"
+
+
+def test_stops_when_pypi_answers_unreadable_json(publish: Publish) -> None:
+    publish.tag("0.2.0")
+    r = publish("v0.2.0", PS_PYPI="garbled")
+    assert r.returncode == 1
+    assert "cannot read PyPI's answer for decdn 0.2.0" in r.stderr
+    assert publish.uploaded() == []
+    assert publish.created() == []
 
 
 # PyPI takes a release file by file: a run stopped between the two uploads leaves one.

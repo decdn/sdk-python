@@ -14,10 +14,12 @@ release it needs is a compatibility floor, not a shared version.
 
 Before the first release, confirm that you own the `decdn` project on PyPI (or
 can create it) and add a second maintainer, so the package outlives one
-account. Have a PyPI API token for the project in `UV_PUBLISH_TOKEN` (or use
-trusted publishing from your own machine's credentials), and `gh auth login`;
-`publish.sh` uses both, and the gh account needs write access to
-`decdn/sdk-python` to make the GitHub release.
+account. `publish.sh` uploads with `uv publish` and needs PyPI credentials for
+the project: a PyPI API token in `UV_PUBLISH_TOKEN`, or `UV_PUBLISH_PASSWORD`,
+or `UV_KEYRING_PROVIDER=subprocess` with the token in your keyring. It also
+needs `gh auth login`, with an account that has write access to
+`decdn/sdk-python` to make the GitHub release. It runs on a maintainer's
+machine and refuses to upload in CI (`CI` or `GITHUB_ACTIONS` set).
 
 `KEYS` holds the maintainer keys a release tag may be signed by. It is a
 verbatim copy of [decdn's `KEYS`](https://github.com/decdn/decdn/blob/main/KEYS):
@@ -71,10 +73,13 @@ the diff it would commit, and changes no file. It:
    letter capitalised: `fix(client): keep the query (#12)` becomes
    `- **client**: Keep the query (#12)`. PRs are squash-merged with the PR
    title as the subject, so the PR title is the changelog entry.
-5. **Bumps and checks** (`--execute` only): `uv version X.Y.Z`, then the gate
-   (`ruff check`, `ruff format --check`, `mypy`, `pytest`), `uv build` and
-   `scripts/check-package.sh` (`--no-verify` skips the checks). The files it
-   commits are the diff it showed, byte for byte, or it stops.
+5. **Bumps and checks** (`--execute` only): `uv version X.Y.Z --frozen`
+   (`pyproject.toml`), `uv lock` (`uv.lock`) and a rewrite of `__version__`
+   in `src/decdn/_version.py`, then the gate (`ruff check`,
+   `ruff format --check`, `mypy`, `pytest`), `uv build` and
+   `scripts/check-package.sh` (`--no-verify` skips the checks). The commit
+   holds four files, those three and `CHANGELOG.md`, each the diff it showed,
+   byte for byte, or it stops.
 6. **Commits** (`--execute` only) `chore(release): vX.Y.Z` and tags `vX.Y.Z`
    (`decdn X.Y.Z`), both signed, and pushes them with
    `git push --atomic origin main vX.Y.Z`: origin gets both or neither. If a
@@ -111,10 +116,12 @@ section is kept: the script refuses one, because every later section is
 generated.
 
 **A prerelease** follows PEP 440 (`0.2.0rc1`, tagged `v0.2.0rc1`) and is not
-cut by `release.sh`. Set `version` to it in a PR, tag the merged commit by
-hand with `git tag -s` and push the tag, publish it, then set `version` back
-to the last release in the next PR: `release.sh` refuses a `pyproject.toml`
-that is not at the last `vX.Y.Z` tag. Prerelease tags are not changelog
+cut by `release.sh`. In a PR, set `version` to it (`uv version 0.2.0rc1
+--frozen`), set `__version__` in `src/decdn/_version.py` to match and refresh
+`uv.lock` (`uv lock`); tag the merged commit by hand with `git tag -s` and push
+the tag, publish it, then set all three back to the last release in the next
+PR: `release.sh` refuses a `pyproject.toml` that is not at the last `vX.Y.Z`
+tag, and a `_version.py` out of step with it. Prerelease tags are not changelog
 boundaries, so the commits up to the prerelease fall into the next release's
 generated section.
 
@@ -134,10 +141,11 @@ delete it first.
 
 **A PyPI version is published once.** It is immutable: a filename can never be
 uploaded again, even after a delete. A broken release is fixed by the next
-patch version and a yank of the broken one. Running `publish.sh` again skips
-the upload when PyPI has the version and the GitHub release when it exists, so
-it finishes a run whose GitHub step failed; an existing release's notes are
-left as they are.
+patch version and a yank of the broken one. PyPI takes the sdist and the
+wheel as separate uploads, so running `publish.sh` again uploads only the
+files PyPI lacks for the version (none when it has both) and skips the GitHub
+release when it exists: it finishes a run whose upload or GitHub step failed.
+An existing release's notes are left as they are.
 
 ## The two floors
 

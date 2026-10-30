@@ -242,10 +242,12 @@ code=$(curl --silent --show-error --location --output "$SCRATCH/pypi.json" --wri
   "https://pypi.org/pypi/$NAME/$VERSION/json" 2>"$SCRATCH/pypi.err") || code=""
 case "$code" in
   200)
-    mapfile -t ON_PYPI < <(python3 -c 'import json, sys
+    # Captured before mapfile, which would hide python3's failure.
+    listing=$(python3 -c 'import json, sys
 for u in json.load(open(sys.argv[1]))["urls"]:
     print(u["filename"], "sha256:" + u["digests"]["sha256"])' "$SCRATCH/pypi.json") ||
-      die "cannot read PyPI's answer for $NAME $VERSION" ;;
+      die "cannot read PyPI's answer for $NAME $VERSION"
+    [[ -z "$listing" ]] || mapfile -t ON_PYPI <<<"$listing" ;;
   404) ;;
   *)
     cat "$SCRATCH/pypi.err" >&2

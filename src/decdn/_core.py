@@ -68,6 +68,11 @@ class Resolved:
     site_url: str | None = None
 
 
+# Public through `decdn.client`, which re-exports them: reprs, docs and pickles name it.
+for _cls in (ByteRange, HeadInfo, Resolved):
+    _cls.__module__ = "decdn.client"
+
+
 @dataclass
 class Plan:
     """One request `get` sends, and what its body must hash to."""

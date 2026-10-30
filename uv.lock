@@ -547,7 +547,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio", specifier = ">=4" },
-    { name = "git-cliff", specifier = ">=2" },
+    { name = "git-cliff", specifier = ">=2.14" },
     { name = "mypy", specifier = ">=1.19" },
     { name = "pre-commit", specifier = ">=4" },
     { name = "pytest", specifier = ">=9" },

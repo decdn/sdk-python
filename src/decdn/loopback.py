@@ -54,8 +54,8 @@ def _check(context: str) -> None:
         raise DecdnError("CONFIG", "the delegate and capability API is a loopback gateway's alone")
 
 
-def _headers(auth: dict[str, str], has_body: bool) -> dict[str, str]:
-    return {**auth, "content-type": "application/json"} if has_body else dict(auth)
+def _headers(has_body: bool) -> dict[str, str]:
+    return {"content-type": "application/json"} if has_body else {}
 
 
 def _registration_body(capability: str, scope: str) -> bytes:
@@ -96,9 +96,7 @@ class LoopbackApi:
     def _call(self, method: str, path: str, body: bytes | None = None) -> bytes:
         c = self._client
         _check(c.context)
-        response = c._send(
-            f"{c.origin}{path}", method, _headers(c.auth_headers(), body is not None), content=body
-        )
+        response = c._send(f"{c._origin}{path}", method, _headers(body is not None), content=body)
         try:
             return response.read()
         finally:
@@ -129,9 +127,7 @@ class AsyncLoopbackApi:
     async def _call(self, method: str, path: str, body: bytes | None = None) -> bytes:
         c = self._client
         _check(c.context)
-        response = await c._send(
-            f"{c.origin}{path}", method, _headers(c.auth_headers(), body is not None), content=body
-        )
+        response = await c._send(f"{c._origin}{path}", method, _headers(body is not None), content=body)
         try:
             return await response.aread()
         finally:

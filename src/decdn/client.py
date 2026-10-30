@@ -82,8 +82,8 @@ class Client:
         )
         self.context: Context = self._core.context
         # The bare origin: the gateway URL's.
-        self.origin: str = self._core.origin
-        self.pointer_domain: PointerDomain | None = pointer
+        self._origin: str = self._core.origin
+        self._pointer_domain: PointerDomain | None = pointer
         # Namespace pointers (public gateway).
         self.pointer: PointerApi = PointerApi(self)
         # The delegate and capability API (loopback gateway).
@@ -95,10 +95,6 @@ class Client:
             follow_redirects=True,
             trust_env=self.context != "loopback",
         )
-
-    def auth_headers(self) -> dict[str, str]:
-        """Return the headers every bare-host request carries."""
-        return self._core.auth_headers()
 
     def _send(
         self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
@@ -266,8 +262,8 @@ class AsyncClient:
         )
         self.context: Context = self._core.context
         # The bare origin: the gateway URL's.
-        self.origin: str = self._core.origin
-        self.pointer_domain: PointerDomain | None = pointer
+        self._origin: str = self._core.origin
+        self._pointer_domain: PointerDomain | None = pointer
         # Namespace pointers (public gateway).
         self.pointer: AsyncPointerApi = AsyncPointerApi(self)
         # The delegate and capability API (loopback gateway).
@@ -281,10 +277,6 @@ class AsyncClient:
         )
         # Manifest reads in flight, by hash: every caller of one hash awaits the same read.
         self._pending: dict[str, asyncio.Task[BundleManifest]] = {}
-
-    def auth_headers(self) -> dict[str, str]:
-        """Return the headers every bare-host request carries."""
-        return self._core.auth_headers()
 
     async def _send(
         self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None

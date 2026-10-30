@@ -114,7 +114,7 @@ def parse_manifest(data: bytes, expected_hash: str | None = None) -> BundleManif
         )
     try:
         doc = json.loads(data.decode("utf-8"))
-    except ValueError as e:  # UnicodeDecodeError and JSONDecodeError are both ValueErrors
+    except (ValueError, RecursionError) as e:  # bad UTF-8, bad JSON, or hostile nesting
         raise DecdnError("MALFORMED_MANIFEST", "parse bundle JSON (expected v1 manifest)") from e
     version = doc.get("version") if isinstance(doc, dict) else None
     if (

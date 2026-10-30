@@ -144,3 +144,7 @@ def test_refuses_bytes_that_do_not_hash_to_the_expected_manifest_hash() -> None:
         parse_manifest(data, AB)
     assert info.value.code == "HASH_MISMATCH"
     assert parse_manifest(data, blake3_hex(data)).entries == ()
+
+
+def test_rejects_hostile_nesting_as_malformed() -> None:
+    malformed(b"[" * 100_000)

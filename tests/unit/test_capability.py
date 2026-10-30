@@ -3,6 +3,7 @@ import pytest
 from decdn.capability import Capability, parse_capability
 from decdn.errors import DecdnError
 from tests.conftest import fixture_json
+from tests.support.postcard import encode_capability
 
 fixture = fixture_json("capability")
 PREFIX = "dcap1:"
@@ -41,3 +42,16 @@ def test_rejects_a_truncated_or_padded_payload() -> None:
     body = fixture["token"][len(PREFIX) :]
     assert bad(f"{PREFIX}{body[: len(body) // 2]}").code == "BAD_CAPABILITY"
     assert "malformed" in str(bad(f"{fixture['token']}AA"))
+
+
+def test_encode_round_trips_the_pinned_token() -> None:
+    signature = bytes.fromhex(fixture["ownerSignature"][2:])
+    token = encode_capability(
+        fixture["poolId"],
+        fixture["signer"],
+        int(fixture["spendingCap"]),
+        int(fixture["expiry"]),
+        signature,
+    )
+    assert token == fixture["token"]
+    assert parse_capability(token) == parse_capability(fixture["token"])

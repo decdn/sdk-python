@@ -4,9 +4,12 @@ import httpx
 import pytest
 
 from decdn.base32 import hash_to_base32
+from decdn.client import Client
+from decdn.errors import DecdnError
 from decdn.pointer import PointerDomain
 from tests.conftest import fixture_json
 from tests.fake_gateway import PROOF_BYTES, FakeGateway, checksum
+from tests.support.host_transport import AsyncHostTransport, HostTransport
 
 EXPOSED = (
     "Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition, ETag, Retry-After, Link"
@@ -370,3 +373,63 @@ async def test_transport_serves_an_async_client() -> None:
             await c.get(f"{fake.url}/{cut}")
         # The request body reaches the sync handler under the async client.
         assert (await c.put(f"{fake.url}/_pointer", content=body)).text == "no chain\n"
+
+
+def test_listen_serves_over_a_socket() -> None:
+    fake = FakeGateway("public")
+    h = fake.add_blob("hello")
+    cut = fake.add_blob("0123456789")
+    fake.truncated.add(cut)
+    bundle = fake.add_bundle({"unsized.txt": "no size here"}, ["unsized.txt"])
+    cut_entry = bundle.entry("unsized.txt")
+    assert cut_entry is not None
+    fake.truncated.add(cut_entry.hash)
+    listener = fake.listen()
+    try:
+        assert listener.address.startswith("127.0.0.1:")
+        with httpx.Client(transport=HostTransport(listener.address)) as c:
+            r = c.get(f"{fake.url}/{h}")
+            assert (r.status_code, r.content) == (200, b"hello")
+            assert r.headers["content-length"] == "5"
+            assert r.headers["access-control-allow-origin"] == "*"
+            assert r.headers["content-disposition"] == f'inline; filename="{h}"'
+            assert str(r.request.url) == f"{fake.url}/{h}"
+            head = c.head(f"{fake.url}/{h}")
+            assert (head.status_code, head.content, head.headers["content-length"]) == (200, b"", "5")
+            assert c.get("http://evil.example/").status_code == 403
+            with pytest.raises(httpx.TransportError):
+                c.get(f"{fake.url}/{cut}")
+            site = f"http://{hash_to_base32(bundle.hash)}.{fake.host}/unsized.txt"
+            with pytest.raises(httpx.TransportError):
+                c.get(site)
+            # The connection the cut body closed does not poison the next request.
+            assert c.get(f"{fake.url}/{h}").content == b"hello"
+        with (
+            Client(fake.url, transport=HostTransport(listener.address)) as client_,
+            pytest.raises(DecdnError) as info,
+        ):
+            client_.get(f"decdn:{cut}").read()
+        assert info.value.code == "TRUNCATED"
+    finally:
+        listener.close()
+
+
+@pytest.mark.anyio
+async def test_listen_serves_an_async_client() -> None:
+    fake = FakeGateway("loopback")
+    h = fake.add_blob("hello")
+    listener = fake.listen()
+    try:
+        async with httpx.AsyncClient(transport=AsyncHostTransport(listener.address)) as c:
+            r = await c.get(f"{fake.url}/{h}", headers={"x-decdn-token": fake.token})
+            assert (r.status_code, r.text) == (401, "page host required\n")
+            fake.scopes.append("example.com")
+            r = await c.get(
+                f"{fake.url}/{h}", headers={"x-decdn-token": fake.token, "x-decdn-host": "example.com"}
+            )
+            assert (r.status_code, r.content) == (200, b"hello")
+            body = json.dumps({"capability": "nope", "scope": "example.com"})
+            r = await c.put(f"{fake.url}/_capability", content=body, headers={"x-decdn-token": fake.token})
+            assert r.status_code == 422
+    finally:
+        listener.close()

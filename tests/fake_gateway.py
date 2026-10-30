@@ -13,9 +13,12 @@ import json
 import math
 import re
 import secrets
+import socket
+import threading
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -205,6 +208,14 @@ def checksum(address: str) -> str:
 
 
 @dataclass(frozen=True)
+class Listener:
+    """A fake served over HTTP: `address` is `127.0.0.1:<port>`; `close` stops the server."""
+
+    address: str
+    close: Callable[[], None]
+
+
+@dataclass(frozen=True)
 class _SiteRef:
     """The bundle a site host names, with the namespace it names and the pointer it resolved through."""
 
@@ -301,6 +312,23 @@ class FakeGateway:
         `httpx.MockTransport` reads the request body (`read`/`aread`) before it calls `handle`.
         """
         return httpx.MockTransport(self.handle)
+
+    def listen(self) -> Listener:
+        """Serve this fake over HTTP on `127.0.0.1` at a free port, from a daemon thread.
+
+        A request's URL is `http://<Host header><path>`, so one listener answers the bare host and
+        every site host. A body whose pull fails (a `truncated` hash) ends with the connection
+        closed mid-way, as the gateway aborts it.
+        """
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def close() -> None:
+            server.shutdown()
+            server.server_close()
+
+        return Listener(f"127.0.0.1:{server.server_address[1]}", close)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         """Answer `request`, as the gateway would over HTTP."""
@@ -795,6 +823,56 @@ class FakeGateway:
         else:
             chunks = (out[:half], out[half:]) if half < len(out) else (out[:half],)
         return httpx.Response(status, headers=headers, stream=_Body(chunks, cut=hash_ in self.truncated))
+
+
+def _handler(fake: FakeGateway) -> type[BaseHTTPRequestHandler]:
+    """A request handler class that answers from `fake` over HTTP/1.1."""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def _serve(self) -> None:
+            length = int(self.headers.get("content-length") or 0)
+            body = self.rfile.read(length) if length > 0 else None
+            host = self.headers.get("host") or fake.host
+            response = fake.handle(
+                httpx.Request(
+                    self.command, f"http://{host}{self.path}", headers=self.headers.items(), content=body
+                )
+            )
+            self.send_response_only(response.status_code)
+            for key, value in response.headers.multi_items():
+                self.send_header(key, value)
+            empty = self.command == "HEAD" or response.status_code in (204, 304)
+            chunked = not empty and "content-length" not in response.headers
+            if chunked:
+                self.send_header("transfer-encoding", "chunked")
+            self.end_headers()
+            if empty:
+                response.close()
+                return
+            stream = response.stream
+            assert isinstance(stream, httpx.SyncByteStream)
+            try:
+                for chunk in stream:
+                    if chunked and chunk:
+                        self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                    elif chunk:
+                        self.wfile.write(chunk)
+            except httpx.ReadError:
+                # The gateway aborts a body whose pull fails after its first byte.
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            if chunked:
+                self.wfile.write(b"0\r\n\r\n")
+
+        do_GET = do_HEAD = do_PUT = do_POST = do_DELETE = do_OPTIONS = do_PATCH = _serve
+
+    return Handler
 
 
 def _path_and_search(url: httpx.URL) -> tuple[str, str]:

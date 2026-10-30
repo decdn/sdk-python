@@ -17,16 +17,12 @@ concurrency:
 
 jobs:
   # Lint, types, the changelog config, unit, script and contract tests (against
-  # the fake gateway) with coverage, and the build. The real-gateway contract
-  # runs are decdn's e2e harness.
+  # the fake gateway) and the build. The real-gateway contract runs are decdn's
+  # e2e harness.
   test:
     name: test (python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      # `Upload code coverage` posts the Cobertura report to GitHub Code Quality.
-      code-quality: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,14 +41,36 @@ jobs:
       - run: uv run mypy
       # Parses cliff.toml and renders the unreleased section.
       - run: uv run git-cliff --unreleased --strip all
-      # Coverage of src/decdn ([tool.coverage] in pyproject.toml), as Cobertura.
+      - run: uv run pytest
+      - run: uv build
+
+  # Coverage of src/decdn ([tool.coverage] in pyproject.toml), posted to GitHub
+  # Code Quality, which comments the PR coverage and per-file deltas against
+  # main. The upload is attributed to the PR's head commit, so the report is
+  # made from that commit, not the merge commit the other jobs test.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # `Upload code coverage` posts the Cobertura report to GitHub Code Quality.
+      code-quality: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen
       - run: uv run pytest --cov --cov-report=term --cov-report=xml
-      # Posts the coverage to GitHub Code Quality, which comments the PR
-      # coverage and per-file deltas against main. Only the 3.13 run uploads,
-      # so each CI run posts one report. Best-effort: a failure never blocks
-      # the PR. The action skips fork PRs by itself (their token is read-only).
+      # Best-effort: a failure never blocks the PR. The action skips fork PRs
+      # by itself (their token is read-only).
       - name: Upload code coverage
-        if: matrix.python-version == '3.13' && hashFiles('coverage.xml') != ''
+        if: hashFiles('coverage.xml') != ''
         continue-on-error: true
         uses: actions/upload-code-coverage@v1
         with:
@@ -60,7 +78,6 @@ jobs:
           language: Python
           label: code-coverage/pytest-cov
           fail-on-error: false
-      - run: uv build
 
   # The tests on the lowest versions pyproject.toml allows of each direct
   # dependency, on the lowest Python: the floors hold. uv sync and uv run both
@@ -121,7 +138,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [test, test-lowest, package, lint-ci]
+    needs: [test, coverage, test-lowest, package, lint-ci]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A re-pushed PR supersedes its own run; a push to main is never cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Lint, types, the changelog config, unit, script and contract tests (against
+  # the fake gateway) and the build. The real-gateway contract runs are decdn's
+  # e2e harness.
+  test:
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      # Parses cliff.toml and renders the unreleased section.
+      - run: uv run git-cliff --unreleased --strip all
+      - run: uv run pytest
+      - run: uv build
+
+  # The package as PyPI would ship it: twine check and the wheel's contents.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: scripts/check-package.sh
+
+  # The workflows and the shell scripts.
+  lint-ci:
+    name: lint (workflows, scripts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: false
+      # The token turns on zizmor's online audits (known-vulnerable actions).
+      # Its policy for action refs is in zizmor.yml.
+      - run: uvx zizmor --format=github .github
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: shellcheck scripts/*.sh
+
+  # The single required check.
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [test, package, lint-ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}

@@ -35,6 +35,7 @@ dev = [
     "pytest>=9",
     "anyio>=4",
     "pytest-timeout>=2",
+    "pytest-cov>=7",
     "ruff>=0.17",
     "mypy>=1.19",
     "twine>=6",
@@ -59,3 +60,16 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 60
+
+# A bare `--cov` measures the `decdn` package (the editable install of
+# src/decdn). relative_files keeps the report's paths relative to the run
+# directory, the repo root in CI, so they match the repo for Code Quality.
+[tool.coverage.run]
+source_pkgs = ["decdn"]
+branch = true
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "^\\s*\\.\\.\\.$"]

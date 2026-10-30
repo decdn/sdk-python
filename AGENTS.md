@@ -20,6 +20,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest
+uv run pytest --cov  # coverage of src/decdn; --cov-report=html for htmlcov/
 scripts/check-package.sh  # after `uv build`: twine check + wheel contents
 ```
 

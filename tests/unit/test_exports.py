@@ -1,3 +1,6 @@
+import tomllib
+from pathlib import Path
+
 import decdn
 
 EXPECTED = [
@@ -61,8 +64,10 @@ EXPECTED = [
 ]
 
 
-def test_version_is_a_pep440_placeholder() -> None:
-    assert decdn.__version__ == "0.0.0"
+def test_version_is_pyprojects() -> None:
+    # scripts/release.sh bumps both together.
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[2] / "pyproject.toml").read_text())
+    assert decdn.__version__ == pyproject["project"]["version"]
 
 
 def test_all_names_resolve() -> None:

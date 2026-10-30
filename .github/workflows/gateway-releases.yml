@@ -1,0 +1,121 @@
+name: Release gateways
+
+# The contract suite against released decdn gateways: the floor `pyproject.toml`
+# (`[tool.decdn] harness-floor`) names as the first decdn release whose harness
+# runs this suite, and the latest release, each through decdn's own harness at
+# that tag with the release's signed binaries (scripts/decdn-contract.sh).
+# decdn's `SDK contract` workflow checks decdn's changes against this repo;
+# this one checks this repo's changes against what users run. While
+# `harness-floor` is empty no release has the harness, so the tags are skipped
+# and the run's summary says why. A dispatch can add any decdn ref, built from
+# source, which runs either way.
+on:
+  workflow_call:
+    inputs:
+      decdn_ref:
+        description: A decdn branch, tag or commit to test too, built from source
+        required: false
+        type: string
+  # Weekly, so a new decdn release is tested without waiting for a change here.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      decdn_ref:
+        description: A decdn branch, tag or commit to test too, built from source
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-releases-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Which decdn gateways to test: the harness floor and the latest release (one
+  # entry when they are the same), plus a dispatched ref.
+  resolve:
+    name: resolve gateways
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: matrix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DECDN_REF: ${{ inputs.decdn_ref }}
+        run: |
+          floor=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["decdn"]["harness-floor"])')
+          entries='[]'
+          if [[ -z "$floor" ]]; then
+            {
+              echo "### Released decdn gateways skipped"
+              echo
+              echo "\`[tool.decdn] harness-floor\` in \`pyproject.toml\` is empty: no decdn release ships the e2e harness that runs this SDK's contract suite yet. Set it to the first one that does (RELEASING.md)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            latest=$(gh api repos/decdn/decdn/releases/latest --jq .tag_name)
+            for tag in $(printf '%s\n' "v$floor" "$latest" | sort -u); do
+              entries=$(jq -c --arg t "$tag" '. + [{mode: "tag", target: $t}]' <<<"$entries")
+            done
+          fi
+          if [[ -n "$DECDN_REF" ]]; then
+            entries=$(jq -c --arg r "$DECDN_REF" '. + [{mode: "ref", target: $r}]' <<<"$entries")
+          fi
+          echo "matrix=$entries" >> "$GITHUB_OUTPUT"
+          echo "gateways: $entries"
+
+  contract:
+    name: contract (decdn ${{ matrix.target }})
+    needs: resolve
+    if: needs.resolve.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    # A cold run builds decdn's e2e harness (a ref also builds `decdn` and
+    # `decdn-node`) and runs two contract journeys at the 600s heavy tier.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold -C debuginfo=line-tables-only -C split-debuginfo=unpacked"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: rui314/setup-mold@v1
+        with:
+          make-default: false
+      - uses: foundry-rs/foundry-toolchain@v1.9.2
+        with:
+          version: v1.7.1
+          cache: false
+      - uses: taiki-e/install-action@v2.87.32
+        with:
+          tool: cargo-nextest
+      # decdn's build, keyed by what it builds: a release tag never changes, so
+      # its first run compiles and later runs restore. A ref is restored from
+      # nothing new and never saved.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: decdn -> target
+          shared-key: decdn-${{ matrix.target }}
+          save-if: ${{ matrix.mode == 'tag' }}
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Run the contract suite against decdn ${{ matrix.target }}
+        env:
+          MODE: ${{ matrix.mode }}
+          TARGET: ${{ matrix.target }}
+        run: scripts/decdn-contract.sh "--$MODE" "$TARGET" --decdn-dir "$GITHUB_WORKSPACE/decdn"

@@ -129,3 +129,7 @@ def test_encodes_what_is_not_a_pchar() -> None:
 
 def test_writes_a_namespace_hint() -> None:
     assert format_uri(DecdnUri(hash=HEX, kind="bundle", namespace=7)) == f"decdn:{HEX}/?ns=7"
+
+
+def test_rejects_a_namespace_too_long_to_parse() -> None:
+    assert re.search(r"out of range", bad_uri(f"decdn:{HEX}?ns=" + "9" * 5000))

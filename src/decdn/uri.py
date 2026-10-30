@@ -121,7 +121,10 @@ def _parse_query(query: str) -> int:
             raise _bad_query("`ns` given twice")
         if _DECIMAL_RE.fullmatch(value) is None:
             raise _bad_namespace(f"`{value}` is not a decimal id")
-        id_ = int(value)
+        digits = value.lstrip("0")
+        if len(digits) > len(str(_U64_MAX)):
+            raise _bad_namespace(f"`{value}` is out of range")
+        id_ = int(digits or "0")
         if id_ > _U64_MAX:
             raise _bad_namespace(f"`{value}` is out of range")
         if id_ == 0:

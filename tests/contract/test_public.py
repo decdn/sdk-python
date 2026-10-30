@@ -1,6 +1,6 @@
 """The SDK against a public gateway: the fake by default, the real binary when decdn's contract run
 runs this file with `DECDN_CONTRACT`:
-https://github.com/decdn/decdn/blob/main/crates/e2e/tests/gateway_sdk.rs
+https://github.com/decdn/decdn/blob/main/crates/e2e/src/sdk_contract.rs
 """
 
 from collections.abc import Iterator

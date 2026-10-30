@@ -81,3 +81,89 @@ async def test_async_iter_and_json() -> None:
     assert [c async for c in r.iter_bytes()] == [b"[1]"]
     r2 = AsyncResponse(_raw(), _ait([b"[1]"]), True)
     assert await r2.json() == [1]
+
+
+def _bad() -> Response:
+    return Response(_raw(), guard(_it([b"ab"]), GuardOptions(hash="0" * 64)), True)
+
+
+def test_read_after_hash_mismatch_raises_again() -> None:
+    r = _bad()
+    with pytest.raises(DecdnError) as first:
+        r.read()
+    with pytest.raises(DecdnError) as second:
+        r.read()
+    assert second.value is first.value and first.value.code == "HASH_MISMATCH"
+    with pytest.raises(DecdnError) as third:
+        r.iter_bytes()
+    assert third.value is first.value
+
+
+def test_read_after_partial_iteration_is_refused() -> None:
+    r = Response(_raw(), _it([b"a", b"b"]), True)
+    assert next(r.iter_bytes()) == b"a"
+    with pytest.raises(DecdnError) as e:
+        r.read()
+    assert e.value.code == "CONFIG"
+    assert str(e.value) == "the body is already being streamed by iter_bytes()"
+
+
+def test_iter_after_read_is_refused() -> None:
+    r = Response(_raw(), _it([b"a"]), True)
+    assert r.read() == b"a"
+    with pytest.raises(DecdnError) as e:
+        r.iter_bytes()
+    assert (e.value.code, str(e.value)) == ("CONFIG", "the body is already consumed")
+
+
+def test_iter_error_is_remembered_by_read() -> None:
+    r = _bad()
+    with pytest.raises(DecdnError) as first:
+        list(r.iter_bytes())
+    with pytest.raises(DecdnError) as second:
+        r.read()
+    assert second.value is first.value
+
+
+async def _abad() -> AsyncResponse:
+    from decdn._verify import aguard
+
+    return AsyncResponse(_raw(), aguard(_ait([b"ab"]), GuardOptions(hash="0" * 64)), True)
+
+
+@pytest.mark.anyio
+async def test_async_read_after_hash_mismatch_raises_again() -> None:
+    r = await _abad()
+    with pytest.raises(DecdnError) as first:
+        await r.read()
+    with pytest.raises(DecdnError) as second:
+        await r.read()
+    assert second.value is first.value and first.value.code == "HASH_MISMATCH"
+
+
+@pytest.mark.anyio
+async def test_async_read_after_partial_iteration_is_refused() -> None:
+    r = AsyncResponse(_raw(), _ait([b"a", b"b"]), True)
+    assert await anext(r.iter_bytes()) == b"a"
+    with pytest.raises(DecdnError) as e:
+        await r.read()
+    assert e.value.code == "CONFIG"
+
+
+@pytest.mark.anyio
+async def test_async_iter_after_read_is_refused() -> None:
+    r = AsyncResponse(_raw(), _ait([b"a"]), True)
+    assert await r.read() == b"a"
+    with pytest.raises(DecdnError) as e:
+        r.iter_bytes()
+    assert e.value.code == "CONFIG"
+
+
+@pytest.mark.anyio
+async def test_async_iter_error_is_remembered_by_read() -> None:
+    r = await _abad()
+    with pytest.raises(DecdnError) as first:
+        [c async for c in r.iter_bytes()]
+    with pytest.raises(DecdnError) as second:
+        await r.read()
+    assert second.value is first.value

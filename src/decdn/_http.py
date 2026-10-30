@@ -26,9 +26,9 @@ CODES: dict[int, ErrorCode] = {
 }
 
 _LINK = re.compile(r'<(decdn:[^>]+)>\s*;\s*rel="?alternate"?')
-_SEQ = re.compile(r'"seq"\s*:\s*(\d+)')
-_DIGITS = re.compile(r"\d+")
-_RANGE_SIZE = re.compile(r"bytes \*/(\d+)")
+_SEQ = re.compile(r'"seq"\s*:\s*([0-9]+)')
+_DIGITS = re.compile(r"[0-9]+")
+_RANGE_SIZE = re.compile(r"bytes \*/([0-9]+)")
 
 
 def is_success(status: int) -> bool:

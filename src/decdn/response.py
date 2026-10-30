@@ -11,9 +11,10 @@ from typing import Any, Literal, Self
 import httpx
 
 from decdn._verify import acollect, collect
+from decdn.errors import DecdnError
 
-_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
-_DIGITS = re.compile(r"\d+")
+_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)")
+_DIGITS = re.compile(r"[0-9]+")
 
 
 @dataclass(frozen=True)
@@ -68,15 +69,44 @@ class Response(_Head):
         super().__init__(raw, verified, content_type)
         self._body = body
         self._cache: bytes | None = None
+        self._failure: DecdnError | None = None
+        self._streaming = False
 
     def iter_bytes(self) -> Iterator[bytes]:
-        """Return the body's chunks. Raises `HASH_MISMATCH` or `TRUNCATED` at the end."""
-        return self._body
+        """Return the body's chunks. Raises `HASH_MISMATCH` or `TRUNCATED` at the end.
+
+        The body is consumed exactly once, by this or by `read()`.
+        """
+        if self._failure is not None:
+            raise self._failure
+        if self._streaming or self._cache is not None:
+            raise DecdnError("CONFIG", "the body is already consumed")
+        self._streaming = True
+        return self._stream()
+
+    def _stream(self) -> Iterator[bytes]:
+        try:
+            yield from self._body
+        except DecdnError as e:
+            self._failure = e
+            raise
 
     def read(self) -> bytes:
-        """Return the whole body, drained once and cached. Raises `HASH_MISMATCH` or `TRUNCATED`."""
-        if self._cache is None:
+        """Return the whole body, drained once and cached.
+
+        Raises `HASH_MISMATCH` or `TRUNCATED`, and raises the same error on every later call.
+        """
+        if self._cache is not None:
+            return self._cache
+        if self._failure is not None:
+            raise self._failure
+        if self._streaming:
+            raise DecdnError("CONFIG", "the body is already being streamed by iter_bytes()")
+        try:
             self._cache = collect(self._body)
+        except DecdnError as e:
+            self._failure = e
+            raise
         return self._cache
 
     def text(self) -> str:
@@ -116,15 +146,45 @@ class AsyncResponse(_Head):
         super().__init__(raw, verified, content_type)
         self._body = body
         self._cache: bytes | None = None
+        self._failure: DecdnError | None = None
+        self._streaming = False
 
     def iter_bytes(self) -> AsyncIterator[bytes]:
-        """Return the body's chunks. Raises `HASH_MISMATCH` or `TRUNCATED` at the end."""
-        return self._body
+        """Return the body's chunks. Raises `HASH_MISMATCH` or `TRUNCATED` at the end.
+
+        The body is consumed exactly once, by this or by `read()`.
+        """
+        if self._failure is not None:
+            raise self._failure
+        if self._streaming or self._cache is not None:
+            raise DecdnError("CONFIG", "the body is already consumed")
+        self._streaming = True
+        return self._stream()
+
+    async def _stream(self) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in self._body:
+                yield chunk
+        except DecdnError as e:
+            self._failure = e
+            raise
 
     async def read(self) -> bytes:
-        """Return the whole body, drained once and cached. Raises `HASH_MISMATCH` or `TRUNCATED`."""
-        if self._cache is None:
+        """Return the whole body, drained once and cached.
+
+        Raises `HASH_MISMATCH` or `TRUNCATED`, and raises the same error on every later call.
+        """
+        if self._cache is not None:
+            return self._cache
+        if self._failure is not None:
+            raise self._failure
+        if self._streaming:
+            raise DecdnError("CONFIG", "the body is already being streamed by iter_bytes()")
+        try:
             self._cache = await acollect(self._body)
+        except DecdnError as e:
+            self._failure = e
+            raise
         return self._cache
 
     async def text(self) -> str:

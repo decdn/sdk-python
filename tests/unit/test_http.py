@@ -72,3 +72,8 @@ def test_network_error_names_the_origin() -> None:
 def test_is_success() -> None:
     assert is_success(200) and is_success(299)
     assert not is_success(199) and not is_success(300)
+
+
+def test_error_of_ignores_non_ascii_digits() -> None:
+    err = error_of(429, httpx.Headers({"retry-after": "٣"}, encoding="utf-8"), "")
+    assert err.retry_after_secs is None

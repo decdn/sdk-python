@@ -210,9 +210,10 @@ else
   [[ -n "$cliff_bin" ]] || die "git-cliff is not installed (uv sync installs it)"
   cliff_version="$("$cliff_bin" --version)" || die "git-cliff --version failed"
   cliff_version="$(awk '{print $2}' <<<"$cliff_version")"
-  # 2.9 added require_conventional, which the unconventional-commit refusal
-  # below needs.
-  ver_gt "2.9.0" "$cliff_version" && die "git-cliff 2.9 or later is required, not ${cliff_version:-unknown}"
+  # The unconventional-commit refusal below needs require_conventional to see
+  # every commit: before 2.14, cliff.toml's `field = "breaking"` parser skips an
+  # unconventional one as a field error first, unnamed.
+  ver_gt "2.14.0" "$cliff_version" && die "git-cliff 2.14 or later is required, not ${cliff_version:-unknown}"
   [[ "$current" == "$prev" ]] \
     || die "$manifest is $current, but the last tag is $prefix$prev: fix the manifest first"
   if grep -q '^## \[Unreleased\]' "$changelog"; then

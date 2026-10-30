@@ -1,3 +1,5 @@
+import importlib
+import pickle
 import tomllib
 from pathlib import Path
 
@@ -78,3 +80,19 @@ def test_all_names_resolve() -> None:
 def test_mirrors_the_typescript_index() -> None:
     assert set(decdn.__all__) == set(EXPECTED)
     assert len(decdn.__all__) == len(set(decdn.__all__))
+
+
+def test_names_report_a_public_module() -> None:
+    # A name defined in a private module and re-exported names the public one, which has it.
+    for name in decdn.__all__:
+        obj = getattr(decdn, name)
+        module = getattr(obj, "__module__", None)
+        if not isinstance(module, str) or not module.startswith("decdn"):
+            continue
+        assert not any(part.startswith("_") for part in module.split(".")), (name, module)
+        assert getattr(importlib.import_module(module), obj.__qualname__) is obj, (name, module)
+
+
+def test_core_types_pickle() -> None:
+    value = decdn.ByteRange(0, 1)
+    assert pickle.loads(pickle.dumps(value)) == value

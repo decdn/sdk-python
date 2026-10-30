@@ -322,8 +322,8 @@ class PointerApi:
         signer must own the namespace on the `PublisherRegistry` of the client's `pointer` domain.
         """
         c = self._client
-        body = _request(c.context, c.pointer_domain, namespace, root, seq, signer)
-        response = c._send(f"{c.origin}/_pointer", "PUT", {"content-type": "application/json"}, content=body)
+        body = _request(c.context, c._pointer_domain, namespace, root, seq, signer)
+        response = c._send(f"{c._origin}/_pointer", "PUT", {"content-type": "application/json"}, content=body)
         try:
             return _pointer_set(response.read())
         finally:
@@ -341,9 +341,9 @@ class AsyncPointerApi:
     ) -> PointerSet:
         """Sign a pointer from `namespace` to the bundle `root` and `PUT` it: `PointerApi.set`."""
         c = self._client
-        body = _request(c.context, c.pointer_domain, namespace, root, seq, signer)
+        body = _request(c.context, c._pointer_domain, namespace, root, seq, signer)
         response = await c._send(
-            f"{c.origin}/_pointer", "PUT", {"content-type": "application/json"}, content=body
+            f"{c._origin}/_pointer", "PUT", {"content-type": "application/json"}, content=body
         )
         try:
             return _pointer_set(await response.aread())

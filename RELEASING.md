@@ -91,7 +91,7 @@ the diff it would commit, and changes no file. It:
 
 **Prerequisites.**
 
-- [git-cliff](https://git-cliff.org) 2.9 or later, for `require_conventional`
+- [git-cliff](https://git-cliff.org) 2.14 or later, for `require_conventional`
   (`uv sync` installs it), [uv](https://docs.astral.sh/uv/), and `gh`, logged
   in.
 - `gpg`, and git configured to sign with an OpenPGP key published in `KEYS`

@@ -44,6 +44,26 @@ jobs:
       - run: uv run pytest
       - run: uv build
 
+  # The tests on the lowest versions pyproject.toml allows of each direct
+  # dependency, on the lowest Python: the floors hold. uv sync and uv run both
+  # read UV_RESOLUTION, so neither re-locks to the highest.
+  test-lowest:
+    name: test (lowest direct dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_RESOLUTION: lowest-direct
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest
+
   # The package as PyPI would ship it: twine check and the wheel's contents.
   package:
     name: package
@@ -83,7 +103,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [test, package, lint-ci]
+    needs: [test, test-lowest, package, lint-ci]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

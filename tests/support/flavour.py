@@ -45,10 +45,6 @@ class Driver:
     def context(self) -> Context:
         return self.client.context
 
-    @property
-    def origin(self) -> str:
-        return self.client.origin
-
     async def open(self, fake: FakeGateway | None = None, **kw: Any) -> "Driver":
         """Return a driver over a new client of this flavour.
 

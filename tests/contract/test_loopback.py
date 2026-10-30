@@ -1,6 +1,6 @@
 """The SDK against a loopback gateway with its token: the fake by default, the real binary when
 decdn's contract run runs this file with `DECDN_CONTRACT`:
-https://github.com/decdn/decdn/blob/main/crates/e2e/tests/gateway_sdk.rs
+https://github.com/decdn/decdn/blob/main/crates/e2e/src/sdk_contract.rs
 
 The tests run in file order and share the gateway: content is refused until the capability is
 registered. Each flavour registers its own capability for its own host.

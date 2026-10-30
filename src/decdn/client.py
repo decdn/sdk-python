@@ -52,6 +52,7 @@ class Client:
 
     `token` and `host` open the loopback gateway; so does a gateway on `127.0.0.1`, `localhost`
     or `::1`. `transport` stands in for the network (an `httpx.MockTransport` in tests).
+    A `Client` is not safe for concurrent use from several threads.
     """
 
     def __init__(
@@ -225,7 +226,10 @@ class Client:
 
 
 class AsyncClient:
-    """An asynchronous client over a gateway: `Client`, with coroutines."""
+    """An asynchronous client over a gateway: `Client`, with coroutines, on asyncio.
+
+    Concurrent reads of one uncached manifest share a single request.
+    """
 
     def __init__(
         self,
@@ -256,6 +260,8 @@ class AsyncClient:
         # The delegate and capability API (loopback gateway).
         self.loopback: Any = None
         self._http = httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True)
+        # Manifest reads in flight, by hash: every caller of one hash awaits the same read.
+        self._pending: dict[str, asyncio.Task[BundleManifest]] = {}
 
     def auth_headers(self) -> dict[str, str]:
         """Return the headers every bare-host request carries."""
@@ -306,14 +312,28 @@ class AsyncClient:
         cached = self._core.cache_get(hash_)
         if cached is not None:
             return cached
-        raw = await self._send(self._core.bare_url(DecdnUri(hash=hash_, kind="blob")), "GET", {})
+        pending = self._pending.get(hash_)
+        if pending is None:
+            pending = asyncio.ensure_future(self._read_manifest(hash_))
+            self._pending[hash_] = pending
+        # A caller cancelled while it waits stops waiting; the read goes on for the others.
+        return await asyncio.shield(pending)
+
+    async def _read_manifest(self, hash_: str) -> BundleManifest:
+        """Read, verify and cache the manifest of `hash_`: the one read every waiter shares."""
         try:
-            data = await acollect(aguard(raw.aiter_bytes(), GuardOptions()), MAX_MANIFEST_BYTES)
+            raw = await self._send(self._core.bare_url(DecdnUri(hash=hash_, kind="blob")), "GET", {})
+            try:
+                data = await acollect(aguard(raw.aiter_bytes(), GuardOptions()), MAX_MANIFEST_BYTES)
+            finally:
+                await raw.aclose()
+            manifest = parse_manifest(data, hash_)
+            self._core.cache_put(hash_, manifest)
+            return manifest
         finally:
-            await raw.aclose()
-        manifest = parse_manifest(data, hash_)
-        self._core.cache_put(hash_, manifest)
-        return manifest
+            # This read drops its own entry only: the hash's slot may hold a newer read.
+            if self._pending.get(hash_) is asyncio.current_task():
+                del self._pending[hash_]
 
     async def _entry_of(self, uri: DecdnUri) -> ManifestEntry:
         return entry_of(await self.manifest(uri.hash), uri)

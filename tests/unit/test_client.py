@@ -10,7 +10,8 @@ import httpx
 import pytest
 
 from decdn.base32 import hash_to_base32
-from decdn.client import ByteRange, HeadInfo, Resolved
+from decdn.client import AsyncClient, ByteRange, HeadInfo, Resolved
+from decdn.errors import DecdnError
 from decdn.manifest import BundleManifest, ManifestEntry
 from decdn.response import ContentRange
 from decdn.uri import DecdnUri
@@ -649,3 +650,73 @@ async def test_manifest_needs_a_hash_outside_a_site_page(flavour: Driver) -> Non
     c = await flavour.open(fake)
     e = await rejects(c.manifest(), "CONFIG")
     assert str(e) == "manifest needs a hash outside a site page"
+
+
+# The async client's shared manifest reads
+
+
+def manifest_reads(fake: FakeGateway, bundle: BundleManifest) -> int:
+    return len([s for s in fake.seen if s.url.endswith(f"/{bundle.hash}")])
+
+
+def yielding(fake: FakeGateway, gate: asyncio.Event | None = None) -> tuple[httpx.MockTransport, list[str]]:
+    """A transport that yields to the event loop (behind `gate`, when given) before every answer,
+    as a real one does; it lists every URL asked for, answered or not."""
+    asked: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        await asyncio.sleep(0)
+        if gate is not None:
+            await gate.wait()
+        return fake.handle(request)
+
+    return httpx.MockTransport(handle), asked
+
+
+async def test_async_concurrent_manifest_reads_share_one_request() -> None:
+    fake, bundle, _ = public_fake()
+    transport, _ = yielding(fake)
+    async with AsyncClient(fake.url, transport=transport) as c:
+        a, b = await asyncio.gather(
+            c.get(f"decdn:{bundle.hash}/a.txt"), c.get(f"decdn:{bundle.hash}/unsized.txt")
+        )
+        assert await a.text() == "abc"
+        assert await b.text() == "no size"
+    assert manifest_reads(fake, bundle) == 1
+
+
+async def test_async_failed_shared_read_fails_every_waiter_and_caches_nothing() -> None:
+    fake, bundle, _ = public_fake()
+    fake.tampered.add(bundle.hash)
+    transport, _ = yielding(fake)
+    async with AsyncClient(fake.url, transport=transport) as c:
+        outcomes = await asyncio.gather(
+            c.manifest(bundle.hash), c.get(f"decdn:{bundle.hash}/a.txt"), return_exceptions=True
+        )
+        assert [isinstance(o, DecdnError) and o.code for o in outcomes] == ["HASH_MISMATCH"] * 2
+        assert manifest_reads(fake, bundle) == 1
+        fake.tampered.discard(bundle.hash)
+        m = await c.manifest(bundle.hash)
+        assert m.hash == bundle.hash
+        assert await c.manifest(bundle.hash) is m
+    assert manifest_reads(fake, bundle) == 2
+
+
+async def test_async_cancelled_waiter_leaves_the_shared_read_running() -> None:
+    fake, bundle, _ = public_fake()
+    gate = asyncio.Event()
+    transport, asked = yielding(fake, gate)
+    async with AsyncClient(fake.url, transport=transport) as c:
+        first = asyncio.ensure_future(c.manifest(bundle.hash))
+        second = asyncio.ensure_future(c.manifest(bundle.hash))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        first.cancel()
+        gate.set()
+        m = await second
+        assert m.hash == bundle.hash
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await c.manifest(bundle.hash) is m
+    assert asked == [f"{fake.url}/{bundle.hash}"]

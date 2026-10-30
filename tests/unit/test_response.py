@@ -167,3 +167,48 @@ async def test_async_iter_error_is_remembered_by_read() -> None:
     with pytest.raises(DecdnError) as second:
         await r.read()
     assert second.value is first.value
+
+
+def _boom() -> Iterator[bytes]:
+    yield b"a"
+    raise RuntimeError("boom")
+
+
+async def _aboom(exc: BaseException) -> AsyncIterator[bytes]:
+    yield b"a"
+    raise exc
+
+
+def test_read_after_foreign_error_is_refused() -> None:
+    r = Response(_raw(), _boom(), True)
+    with pytest.raises(RuntimeError):
+        r.read()
+    with pytest.raises(DecdnError) as e:
+        r.read()
+    assert e.value.code == "CONFIG"
+    with pytest.raises(DecdnError):
+        r.iter_bytes()
+
+
+@pytest.mark.anyio
+async def test_async_read_after_foreign_error_is_refused() -> None:
+    r = AsyncResponse(_raw(), _aboom(RuntimeError("boom")), True)
+    with pytest.raises(RuntimeError):
+        await r.read()
+    with pytest.raises(DecdnError) as e:
+        await r.read()
+    assert e.value.code == "CONFIG"
+    with pytest.raises(DecdnError):
+        r.iter_bytes()
+
+
+@pytest.mark.anyio
+async def test_read_after_cancellation_is_refused() -> None:
+    import asyncio
+
+    r = AsyncResponse(_raw(), _aboom(asyncio.CancelledError()), True)
+    with pytest.raises(asyncio.CancelledError):
+        await r.read()
+    with pytest.raises(DecdnError) as e:
+        await r.read()
+    assert e.value.code == "CONFIG"

@@ -71,6 +71,7 @@ class Response(_Head):
         self._cache: bytes | None = None
         self._failure: DecdnError | None = None
         self._streaming = False
+        self._consumed = False
 
     def iter_bytes(self) -> Iterator[bytes]:
         """Return the body's chunks. Raises `HASH_MISMATCH` or `TRUNCATED` at the end.
@@ -79,7 +80,7 @@ class Response(_Head):
         """
         if self._failure is not None:
             raise self._failure
-        if self._streaming or self._cache is not None:
+        if self._streaming or self._consumed:
             raise DecdnError("CONFIG", "the body is already consumed")
         self._streaming = True
         return self._stream()
@@ -102,6 +103,10 @@ class Response(_Head):
             raise self._failure
         if self._streaming:
             raise DecdnError("CONFIG", "the body is already being streamed by iter_bytes()")
+        if self._consumed:
+            raise DecdnError("CONFIG", "the body is already consumed")
+        # Marked before the drain: whatever escapes it, the body is not drained twice.
+        self._consumed = True
         try:
             self._cache = collect(self._body)
         except DecdnError as e:
@@ -148,6 +153,7 @@ class AsyncResponse(_Head):
         self._cache: bytes | None = None
         self._failure: DecdnError | None = None
         self._streaming = False
+        self._consumed = False
 
     def iter_bytes(self) -> AsyncIterator[bytes]:
         """Return the body's chunks. Raises `HASH_MISMATCH` or `TRUNCATED` at the end.
@@ -156,7 +162,7 @@ class AsyncResponse(_Head):
         """
         if self._failure is not None:
             raise self._failure
-        if self._streaming or self._cache is not None:
+        if self._streaming or self._consumed:
             raise DecdnError("CONFIG", "the body is already consumed")
         self._streaming = True
         return self._stream()
@@ -180,6 +186,10 @@ class AsyncResponse(_Head):
             raise self._failure
         if self._streaming:
             raise DecdnError("CONFIG", "the body is already being streamed by iter_bytes()")
+        if self._consumed:
+            raise DecdnError("CONFIG", "the body is already consumed")
+        # Marked before the drain: whatever escapes it, the body is not drained twice.
+        self._consumed = True
         try:
             self._cache = await acollect(self._body)
         except DecdnError as e:

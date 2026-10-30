@@ -1,0 +1,61 @@
+[project]
+name = "decdn"
+version = "0.0.0"
+description = "Python client for deCDN over a decdn gateway: verified fetches, bundles, loopback capabilities and namespace pointers."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-*"]
+requires-python = ">=3.11"
+keywords = ["decdn", "cdn", "blake3", "content-addressed", "gateway"]
+classifiers = [
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "httpx>=0.28",
+    "blake3>=1.0",
+    "coincurve>=20",
+    "pycryptodome>=3.20",
+]
+
+[project.urls]
+Homepage = "https://github.com/decdn/sdk-python"
+Repository = "https://github.com/decdn/sdk-python"
+Issues = "https://github.com/decdn/sdk-python/issues"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "anyio>=4",
+    "pytest-timeout>=2",
+    "ruff>=0.16",
+    "mypy>=1.19",
+    "twine>=6",
+    "git-cliff>=2",
+]
+
+[tool.decdn]
+gateway-floor = "0.3.0"
+harness-floor = ""
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60

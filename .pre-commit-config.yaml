@@ -1,15 +1,15 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.17.3
     hooks:
       - id: ruff
       - id: ruff-format
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v4.2.0
+    rev: v4.5.0
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
-  - repo: https://github.com/woodruffw/zizmor-pre-commit
-    rev: v1.14.0
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.31.1
     hooks:
       - id: zizmor

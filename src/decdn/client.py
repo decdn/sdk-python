@@ -11,7 +11,7 @@ Both clients plan with the same sans-I/O core and differ only in how they send.
 import asyncio
 import time
 from types import TracebackType
-from typing import Any, Self
+from typing import Self
 
 import httpx
 
@@ -31,8 +31,9 @@ from decdn._http import error_of, is_success, network_error
 from decdn._mime import is_rewritten_type
 from decdn._verify import GuardOptions, acollect, aguard, collect, guard
 from decdn.errors import DecdnError
+from decdn.loopback import AsyncLoopbackApi, LoopbackApi
 from decdn.manifest import MAX_MANIFEST_BYTES, BundleManifest, ManifestEntry, parse_manifest
-from decdn.pointer import PointerDomain
+from decdn.pointer import AsyncPointerApi, PointerApi, PointerDomain
 from decdn.response import AsyncResponse, Response
 from decdn.uri import DecdnUri
 
@@ -80,19 +81,21 @@ class Client:
         self.origin: str = self._core.origin
         self.pointer_domain: PointerDomain | None = pointer
         # Namespace pointers (public gateway).
-        self.pointer: Any = None
+        self.pointer: PointerApi = PointerApi(self)
         # The delegate and capability API (loopback gateway).
-        self.loopback: Any = None
+        self.loopback: LoopbackApi = LoopbackApi(self)
         self._http = httpx.Client(transport=transport, timeout=timeout, follow_redirects=True)
 
     def auth_headers(self) -> dict[str, str]:
         """Return the headers every bare-host request carries."""
         return self._core.auth_headers()
 
-    def _send(self, url: str, method: str, headers: dict[str, str]) -> httpx.Response:
+    def _send(
+        self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
+    ) -> httpx.Response:
         """Send a streamed request; a non-2xx answer is raised as a `DecdnError`."""
         sent = {**self._core.auth_headers(), **headers} if self._core.is_bare(url) else headers
-        request = self._http.build_request(method, url, headers=sent)
+        request = self._http.build_request(method, url, headers=sent, content=content)
         try:
             response = self._http.send(request, stream=True)
         except httpx.HTTPError as e:
@@ -256,9 +259,9 @@ class AsyncClient:
         self.origin: str = self._core.origin
         self.pointer_domain: PointerDomain | None = pointer
         # Namespace pointers (public gateway).
-        self.pointer: Any = None
+        self.pointer: AsyncPointerApi = AsyncPointerApi(self)
         # The delegate and capability API (loopback gateway).
-        self.loopback: Any = None
+        self.loopback: AsyncLoopbackApi = AsyncLoopbackApi(self)
         self._http = httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True)
         # Manifest reads in flight, by hash: every caller of one hash awaits the same read.
         self._pending: dict[str, asyncio.Task[BundleManifest]] = {}
@@ -267,10 +270,12 @@ class AsyncClient:
         """Return the headers every bare-host request carries."""
         return self._core.auth_headers()
 
-    async def _send(self, url: str, method: str, headers: dict[str, str]) -> httpx.Response:
+    async def _send(
+        self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
+    ) -> httpx.Response:
         """Send a streamed request; a non-2xx answer is raised as a `DecdnError`."""
         sent = {**self._core.auth_headers(), **headers} if self._core.is_bare(url) else headers
-        request = self._http.build_request(method, url, headers=sent)
+        request = self._http.build_request(method, url, headers=sent, content=content)
         try:
             response = await self._http.send(request, stream=True)
         except httpx.HTTPError as e:

@@ -9,14 +9,20 @@ under the domain {name: "decdn-pointer", version: "1", chainId, verifyingContrac
 PublisherRegistry}. The gateway takes a 65-byte `r‖s‖v` signature with a low `s` only.
 """
 
+import json
+import time
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypedDict
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict
 
 import coincurve
 from Crypto.Hash import keccak
 
 from decdn._hex import from_hex, is_hash, to_hex
 from decdn.errors import DecdnError
+from decdn.uri import SCHEME, parse_uri
+
+if TYPE_CHECKING:
+    from decdn.client import AsyncClient, Client
 
 
 @dataclass(frozen=True)
@@ -245,3 +251,101 @@ def recover_pointer_signer(domain: PointerDomain, pointer: Pointer, signature: s
     except ValueError as error:
         raise malformed from error
     return f"0x{to_hex(_keccak(public.format(compressed=False)[1:])[12:])}"
+
+
+@dataclass(frozen=True)
+class PointerSet:
+    """A pointer the gateway took."""
+
+    namespace: int
+    # The bundle's manifest hash.
+    root: str
+    seq: int
+    # The namespace's host on the gateway.
+    url: str
+
+
+def _request(
+    context: str,
+    domain: PointerDomain | None,
+    namespace: int,
+    root: str,
+    seq: int | None,
+    signer: PointerSigner,
+) -> bytes:
+    """Validate a `set` call, sign the pointer and return the `PUT` body."""
+    if context != "public":
+        raise _bad("namespace pointers live on a public gateway")
+    if domain is None:
+        raise _bad("pointer.set needs Client(pointer=PointerDomain(chain_id, publisher_registry))")
+    bare = root[2:] if root.startswith("0x") else root
+    if bare.startswith(SCHEME):
+        uri = parse_uri(bare)
+        if uri.kind != "bundle":
+            raise DecdnError(
+                "BAD_URI",
+                "a pointer names a bundle: pass `decdn:<hash>/`, the manifest hash with its trailing slash",
+            )
+        bare = uri.hash
+    elif not is_hash(bare):
+        raise DecdnError("BAD_URI", f"not a manifest hash: {root}")
+    pointer = Pointer(
+        namespace=_integer(namespace, "a namespace id"),
+        root=bare.lower(),
+        seq=int(time.time()) if seq is None else _integer(seq, "a pointer seq"),
+    )
+    signature = sign_pointer(domain, pointer, signer)
+    return (
+        f'{{"namespace":{pointer.namespace},"root":"0x{pointer.root}","seq":{pointer.seq},'
+        f'"signature":"{signature}"}}'
+    ).encode()
+
+
+def _pointer_set(body: bytes) -> PointerSet:
+    parsed = json.loads(body)
+    return PointerSet(
+        namespace=parsed["namespace"], root=parsed["root"], seq=parsed["seq"], url=parsed["url"]
+    )
+
+
+class PointerApi:
+    """Namespace pointers on a public gateway."""
+
+    def __init__(self, client: "Client") -> None:
+        self._client = client
+
+    def set(self, *, namespace: int, root: str, seq: int | None = None, signer: PointerSigner) -> PointerSet:
+        """Sign a pointer from `namespace` to the bundle `root` and `PUT` it.
+
+        `root` is `decdn:<hash>/` or its manifest hash. `seq` defaults to the current Unix
+        second; the gateway takes only a `seq` above the one it holds from the same signer. The
+        signer must own the namespace on the `PublisherRegistry` of the client's `pointer` domain.
+        """
+        c = self._client
+        body = _request(c.context, c.pointer_domain, namespace, root, seq, signer)
+        response = c._send(f"{c.origin}/_pointer", "PUT", {"content-type": "application/json"}, content=body)
+        try:
+            return _pointer_set(response.read())
+        finally:
+            response.close()
+
+
+class AsyncPointerApi:
+    """Namespace pointers on a public gateway: `PointerApi`, with coroutines."""
+
+    def __init__(self, client: "AsyncClient") -> None:
+        self._client = client
+
+    async def set(
+        self, *, namespace: int, root: str, seq: int | None = None, signer: PointerSigner
+    ) -> PointerSet:
+        """Sign a pointer from `namespace` to the bundle `root` and `PUT` it: `PointerApi.set`."""
+        c = self._client
+        body = _request(c.context, c.pointer_domain, namespace, root, seq, signer)
+        response = await c._send(
+            f"{c.origin}/_pointer", "PUT", {"content-type": "application/json"}, content=body
+        )
+        try:
+            return _pointer_set(await response.aread())
+        finally:
+            await response.aclose()

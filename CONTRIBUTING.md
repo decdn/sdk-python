@@ -15,6 +15,7 @@ uv run ruff check .          # lint
 uv run ruff format --check . # formatting (line length 110)
 uv run mypy                  # strict type check of src and tests
 uv run pytest                # unit tests, script tests, contract suite against the fake gateway
+uv run pytest --cov          # the same, with line and branch coverage of src/decdn
 uv build                     # dist/: sdist and wheel
 scripts/check-package.sh     # twine check and a wheel smoke test in a fresh venv
 ```
@@ -40,11 +41,11 @@ commit.
 
 `.github/workflows/ci.yml` runs on every PR and push to `main`:
 
-| Job       | What it runs                                                                                              | Locally                                                                                         |
-| --------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `test`    | lint, mypy, a git-cliff parse check, tests and build on Python 3.11, 3.12, 3.13 and 3.14                   | `uv run ruff check . && uv run mypy && uv run pytest && uv build`                                |
-| `package` | twine check and the wheel's contents                                                                      | `scripts/check-package.sh`                                                                       |
-| `lint-ci` | zizmor (policy in `zizmor.yml`) and shellcheck                                                            | `uvx zizmor .github && shellcheck scripts/*.sh`                                                  |
+| Job       | What it runs                                                                                                                                     | Locally                                                                 |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `test`    | lint, mypy, a git-cliff parse check, tests with coverage and build on Python 3.11, 3.12 and 3.13; 3.13 posts the coverage to GitHub Code Quality | `uv run ruff check . && uv run mypy && uv run pytest --cov && uv build` |
+| `package` | twine check and the wheel's contents                                                                                                             | `scripts/check-package.sh`                                              |
+| `lint-ci` | zizmor (policy in `zizmor.yml`) and shellcheck                                                                                                   | `uvx zizmor .github && shellcheck scripts/*.sh`                         |
 
 Separate workflows check the PR title (`PR title`) and run CodeQL on the
 Python and the workflows (`CodeQL`).

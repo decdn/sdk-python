@@ -1,25 +1,48 @@
 # Releasing decdn (Python)
 
-Releases are cut locally by `scripts/release.sh` and published from its signed
-tag by `scripts/publish.sh`, which uploads to PyPI with `uv publish` and makes
-the GitHub release. CI builds and tests, but holds no PyPI token and publishes
-nothing: a `push`-triggered workflow runs the workflow definition from the
-pushed ref, so a token reachable from a workflow would be reachable from any
-tag anyone with push access could craft.
+Releases are cut locally by `scripts/release.sh`. `scripts/publish.sh` then
+dispatches [`publish.yml`](.github/workflows/publish.yml) on `main`, which
+publishes the signed tag to PyPI through
+[Trusted Publishing](https://docs.pypi.org/trusted-publishers/) and makes the
+GitHub release. No PyPI token is stored anywhere: each upload trades the
+job's GitHub OIDC token for a short-lived one. A workflow runs its definition
+from the ref it runs on, so a tag anyone with push access could craft would
+carry its own copy of the workflow. The `release` environment is what stops
+that: PyPI trusts `publish.yml` only in that environment, and the environment
+allows deployments from `main` only. Like decdn's
+[`publish-crates.yml`](https://github.com/decdn/decdn/blob/main/.github/workflows/publish-crates.yml),
+the workflow takes KEYS and its scripts from `main`, and runs the tag's code
+(the gate and the build) only after checking its signature, in a job with no
+OIDC access.
 
 The SDK speaks HTTP to a `decdn gateway`. It has its own semver; the gateway
 release it needs is a compatibility floor, not a shared version.
 
 ## One-time setup
 
-Before the first release, confirm that you own the `decdn` project on PyPI (or
-can create it) and add a second maintainer, so the package outlives one
-account. `publish.sh` uploads with `uv publish` and needs PyPI credentials for
-the project: a PyPI API token in `UV_PUBLISH_TOKEN`, or `UV_PUBLISH_PASSWORD`,
-or `UV_KEYRING_PROVIDER=subprocess` with the token in your keyring. It also
-needs `gh auth login`, with an account that has write access to
-`decdn/sdk-python` to make the GitHub release. It runs on a maintainer's
-machine and refuses to upload in CI (`CI` or `GITHUB_ACTIONS` set).
+Once, in this order (the first two before the first release):
+
+1. **The `release` environment.** In _Settings → Environments_ of
+   `decdn/sdk-python`, create `release`, and under _Deployment branches and
+   tags_ allow the `main` branch only. Do this before anything dispatches
+   `publish.yml`: a job that names an environment the repository lacks creates
+   it, with no branch rule.
+2. **The PyPI publisher.** On PyPI, from your account's _Publishing_ page, add
+   a [pending publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
+   for GitHub: project `decdn`, owner `decdn`, repository `sdk-python`,
+   workflow `publish.yml`, environment `release`. It reserves no name: the
+   first upload through it creates the project, owned by your account, and
+   turns it into an ordinary publisher of the project.
+3. **The organisation.** After the first upload, transfer the project to the
+   `decdn` organisation on PyPI, and give an organisation team of at least two
+   people the Owner role on it, so the package outlives one account.
+4. **Tags that stay put.** A ruleset on `refs/tags/v*` that forbids updates
+   and deletions keeps a release tag on the commit PyPI has.
+   `github-release.sh` refuses a tag that moved during a run, but nothing
+   else does.
+
+`publish.sh` needs `gh auth login` with an account that can dispatch workflows
+on `decdn/sdk-python` (write access). It needs no PyPI credentials.
 
 `KEYS` holds the maintainer keys a release tag may be signed by. It is a
 verbatim copy of [decdn's `KEYS`](https://github.com/decdn/decdn/blob/main/KEYS):
@@ -35,7 +58,7 @@ is the separate step after it:
 ```bash
 scripts/release.sh                    # dry run: the new tag and the diff
 scripts/release.sh --execute          # bump, changelog, check, commit, tag, push
-DECDN_PYPI_DRY_RUN=1 scripts/publish.sh v0.2.0   # rehearse, print the notes
+DECDN_PYPI_DRY_RUN=1 scripts/publish.sh v0.2.0   # rehearse: check and build
 scripts/publish.sh v0.2.0                        # PyPI, then GitHub release
 ```
 
@@ -46,8 +69,8 @@ the diff it would commit, and changes no file. It:
 1. **Checks the tree, the key and the floor.** It runs on a clean `main` equal
    to `origin/main`, with every local `vX.Y.Z` tag on origin, and
    `pyproject.toml` at the last release's version. With `--execute`, it signs
-   a throwaway commit and verifies it against `KEYS` alone, as `publish.sh`
-   verifies the tag. It refuses unless the decdn release `gateway-floor` names
+   a throwaway commit and verifies it against `KEYS` alone, as the publish
+   workflow verifies the tag. It refuses unless the decdn release `gateway-floor` names
    is published (see below), and tells a release GitHub does not have from a
    `gh` that cannot ask.
 2. **Refuses unconventional commits.** git-cliff drops a commit it cannot parse
@@ -97,7 +120,8 @@ the diff it would commit, and changes no file. It:
 - `gpg`, and git configured to sign with an OpenPGP key published in `KEYS`
   (`user.signingkey`, `gpg.format` unset or `openpgp`). The script verifies a
   throwaway signature against `KEYS` before the checks, so a key that cannot
-  sign, or one `publish.sh` would refuse, fails before anything is pushed.
+  sign, or one the publish workflow would refuse, fails before anything is
+  pushed.
 - A bypass of the `main` ruleset (an org admin), because the release commit
   goes straight to `main`, where the ruleset's pull-request rule and required
   status checks apply to a direct push too.
@@ -125,25 +149,55 @@ tag, and a `_version.py` out of step with it. Prerelease tags are not changelog
 boundaries, so the commits up to the prerelease fall into the next release's
 generated section.
 
-`publish.sh` refuses a tag that is not `v<version>`, verifies the tag against
-`KEYS` (and against `DECDN_SIGNING_KEY` when set) and against `origin`, checks
-that gh's account can write to `decdn/sdk-python`, checks the tag out into a
-detached worktree, checks that `pyproject.toml` names `decdn` at the tag's
-version and that `CHANGELOG.md` has its section, and runs sync, the gate and
-`uv build` there before `uv publish`. It then makes the tag's GitHub release,
-titled with the tag, its notes the tag's `CHANGELOG.md` section followed by
-the PyPI link and the two floors (`gateway-floor`, `harness-floor`). A
-prerelease goes to PyPI as a pre-release, which `pip install` skips unless
+`publish.sh` refuses a tag that is not `v<version>` or that `decdn/sdk-python`
+does not have, then runs
+`gh workflow run publish.yml --repo decdn/sdk-python --ref main -f tag=<tag> -f dry_run=<bool>`
+and says how to follow the run. It returns once the run is dispatched:
+nothing is on PyPI until the run's `publish` job succeeds. The workflow has
+four jobs, each holding only the access its step needs:
+
+- **`prepare`**, with no OIDC access and no GitHub token, runs
+  [`scripts/prepare-publish.sh`](scripts/prepare-publish.sh) from `main`
+  against the tag checked out at `src/`. It verifies the tag against `KEYS` on
+  `main`, and that the signed tag object names the tag; checks that
+  `pyproject.toml` names `decdn` at the tag's version, that
+  `src/decdn/_version.py` agrees, that `CHANGELOG.md` has the section and the
+  floors are well formed; renders the release notes; runs sync, the gate,
+  `uv build` and `twine check`; and asks PyPI which files of the version it
+  has. A file PyPI has must be the one built here, byte for byte (the build
+  is reproducible), or the version cannot be finished from this tag. The
+  run's summary shows the notes.
+- **`release-state`**, with `contents: write` (GitHub lists draft releases
+  only to callers with push access) and none of the tag's code, runs
+  [`scripts/release-state.sh`](scripts/release-state.sh). A draft release for
+  the tag stops the run before the upload: publish or delete the draft first.
+- **`publish`**, in the `release` environment and the only job with
+  `id-token: write`, uploads what `prepare` built with
+  [`pypa/gh-action-pypi-publish`](https://github.com/pypa/gh-action-pypi-publish),
+  which attaches [PEP 740](https://peps.python.org/pep-0740/) attestations.
+  It is skipped on a dry run and when PyPI has every file.
+- **`github-release`**, with `contents: write`, runs
+  [`scripts/github-release.sh`](scripts/github-release.sh): it checks that the
+  tag still names the commit `prepare` verified, then makes the tag's GitHub
+  release, titled with the tag, its notes the tag's `CHANGELOG.md` section
+  followed by the PyPI link and the two floors (`gateway-floor`,
+  `harness-floor`). It is skipped on a dry run, after a failed upload, and
+  when the release exists.
+
+Every action in the workflow is pinned to a commit, with its version in a
+comment.
+
+A prerelease goes to PyPI as a pre-release, which `pip install` skips unless
 asked (`--pre`); its GitHub release is a prerelease, never the latest, and
-with no changelog section its notes are the PyPI link and floors alone. A
-draft release for the tag stops the script before the upload: publish or
-delete it first.
+when `CHANGELOG.md` has no section for it, its notes are the PyPI link and
+floors alone.
 
 **A PyPI version is published once.** It is immutable: a filename can never be
 uploaded again, even after a delete. A broken release is fixed by the next
 patch version and a yank of the broken one. PyPI takes the sdist and the
 wheel as separate uploads, so running `publish.sh` again uploads only the
-files PyPI lacks for the version (none when it has both) and skips the GitHub
+files PyPI lacks for the version (none when it has both, and nothing when a
+file it has differs from the build) and skips the GitHub
 release when it exists: it finishes a run whose upload or GitHub step failed.
 An existing release's notes are left as they are.
 

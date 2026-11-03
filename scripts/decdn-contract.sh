@@ -113,7 +113,7 @@ git -C "$DIR" submodule update --quiet --init --recursive ||
 
 if [[ -n "$TAG" ]]; then
   # The tag and the archives must be the ones a maintainer signed: only the
-  # keys in KEYS, as scripts/publish.sh checks its own tags.
+  # keys in KEYS, as scripts/prepare-publish.sh checks this repository's tags.
   export GNUPGHOME="$WORK/gnupg"
   mkdir -m 700 "$GNUPGHOME"
   gpg --quiet --import "$SDK_DIR/KEYS" 2>/dev/null || die "KEYS is not a valid OpenPGP keyring"

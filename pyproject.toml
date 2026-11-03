@@ -1,6 +1,6 @@
 [project]
 name = "decdn"
-version = "0.0.0"
+version = "0.1.0"
 description = "Python client for deCDN over a decdn gateway: verified fetches, bundles, loopback capabilities and namespace pointers."
 readme = "README.md"
 license = "MIT OR Apache-2.0"

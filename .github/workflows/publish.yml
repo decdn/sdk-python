@@ -228,10 +228,12 @@ jobs:
     name: Make the GitHub release
     needs: [prepare, release-state, publish]
     # After an upload, or when PyPI already had every file (`publish` skipped
-    # because `pending` is false), but never after a failed upload, and only
-    # when GitHub answered that the tag has no release.
+    # because `pending` is false), but never after a failed upload or a
+    # cancelled run, and only when GitHub answered that the tag has no release.
+    # `!cancelled()`, not `always()`: either lets the job follow a skipped
+    # `publish`, but `always()` runs it after a cancel too.
     if: >-
-      ${{ always() && !inputs.dry_run
+      ${{ !cancelled() && !inputs.dry_run
       && needs.prepare.result == 'success'
       && needs.release-state.result == 'success'
       && needs.release-state.outputs.has_release == 'false'

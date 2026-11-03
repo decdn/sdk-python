@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Checks a signed `v<version>` tag of `decdn` and builds it for PyPI. The
-# `prepare` job of .github/workflows/publish.yml runs it, with no OIDC access:
-# the upload is the `publish` job's, and the GitHub release the
-# `github-release` job's.
+# `prepare` job of .github/workflows/publish.yml runs it with no OIDC access
+# and no GitHub token: the upload is the `publish` job's, and the GitHub
+# release, and the check for a draft of it, other jobs'.
 #
 # Usage:  scripts/prepare-publish.sh <tag> <src> <keys> <out>
 #
 #   <tag>   the release tag, e.g. v0.1.0
-#   <src>   a checkout of the tag; it is built, never trusted
+#   <src>   a checkout of the tag; its gate and build run only after its
+#           signature is checked, and nothing it carries decides whether it
+#           is accepted
 #   <keys>  the KEYS the tag must be signed by, from the trusted checkout: a
 #           KEYS the tag carried would vouch for itself
 #   <out>   a new directory for what the later jobs take:
@@ -15,24 +17,24 @@
 #             notes.md   the GitHub release's notes: the tag's CHANGELOG.md
 #                        section, the PyPI link and the two floors
 #             outputs    key=value lines for $GITHUB_OUTPUT:
-#                        version, prerelease (true/false), pending (PyPI lacks
-#                        a file of the version) and has_release (the GitHub
-#                        release exists)
+#                        version, sha (the tag's commit), prerelease
+#                        (true/false) and pending (true when PyPI lacks a
+#                        file of the version, false when it has both)
 #
 # A prerelease (PEP 440: `v0.2.0rc1`, `v0.2.0a1`, `v0.2.0b1`, `v0.2.0.dev1`)
-# needs no CHANGELOG.md section; its notes are the footer alone.
+# needs no CHANGELOG.md section: without one, its notes are the footer alone.
 #
-# A PyPI file is immutable, so everything that could refuse the release refuses
-# it here, before the upload: the signature, the version in pyproject.toml and
+# A PyPI file is immutable, so every check this repository can make refuses
+# the release here, before the upload: the signature and the tag's own name,
+# the package name and the version in pyproject.toml and
 # src/decdn/_version.py, the CHANGELOG.md section, the floors, the gate, the
-# build and a draft release for the tag.
+# build, `twine check`, and a file PyPI already has with other contents.
 set -euo pipefail
 
 TAG="${1:?usage: $0 <tag> <src> <keys> <out>}"
 SRC="${2:?usage: $0 <tag> <src> <keys> <out>}"
 KEYS_FILE="${3:?usage: $0 <tag> <src> <keys> <out>}"
 OUT="${4:?usage: $0 <tag> <src> <keys> <out>}"
-REPO=decdn/sdk-python
 NAME=decdn
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -48,7 +50,7 @@ PRERELEASE=false
 
 # ---- preconditions -------------------------------------------------------
 
-for tool in git gh gpg uv curl python3; do
+for tool in git gpg uv curl python3 sha256sum; do
   command -v "$tool" >/dev/null || die "$tool not found on PATH"
 done
 python3 -c 'import tomllib' 2>/dev/null || die "python3 has no tomllib: Python 3.11 or later is required"
@@ -65,8 +67,10 @@ KEYS_HOME=$(mktemp -d)
 chmod 700 "$KEYS_HOME"
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$KEYS_HOME" "$SCRATCH"' EXIT
-gpg --homedir "$KEYS_HOME" --import "$KEYS_FILE" >/dev/null 2>&1 ||
+gpg --homedir "$KEYS_HOME" --batch --import "$KEYS_FILE" >/dev/null 2>"$SCRATCH/gpg.err" || {
+  cat "$SCRATCH/gpg.err" >&2
   die "KEYS is not a valid OpenPGP keyring"
+}
 
 cd "$SRC" || die "cannot enter $SRC"
 
@@ -77,8 +81,13 @@ git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null ||
 echo "==> Verifying $TAG"
 GNUPGHOME="$KEYS_HOME" git verify-tag "$TAG" ||
   die "$TAG is not signed by a key published in KEYS"
-[[ "$(git rev-parse "refs/tags/${TAG}^{commit}")" == "$(git rev-parse HEAD)" ]] ||
-  die "$SRC is not checked out at $TAG"
+# The signature covers the tag object, whose own `tag` header names it; the
+# ref's name does not. A tag signed as v0.1.0 and pushed as v0.2.0 is refused.
+SIGNED_NAME=$(git for-each-ref --format='%(tag)' "refs/tags/${TAG}")
+[[ "$SIGNED_NAME" == "$TAG" ]] ||
+  die "the tag object at refs/tags/$TAG was signed as '$SIGNED_NAME', not $TAG"
+SHA=$(git rev-parse "refs/tags/${TAG}^{commit}")
+[[ "$SHA" == "$(git rev-parse HEAD)" ]] || die "$SRC is not checked out at $TAG"
 
 # ---- the package at the tag ----------------------------------------------
 
@@ -102,9 +111,10 @@ MODULE_VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/decdn/_version.py 
 echo "==> $NAME $VERSION$([[ "$PRERELEASE" == false ]] || echo ' (a prerelease)')"
 
 # The release notes: the tag's CHANGELOG.md section without its heading, then
-# where to get the package and the gateway it needs. A prerelease has no
-# section (its commits fall into the next release's), so its notes are the
-# footer alone; a release without one stops here, before anything is built.
+# where to get the package and the gateway it needs. A prerelease may have no
+# section (its commits fall into the next release's), and then its notes are
+# the footer alone; a release without one stops here, before anything is
+# built.
 FLOOR=$(toml tool.decdn.gateway-floor) || die "cannot read pyproject.toml at $TAG"
 [[ "$FLOOR" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   die "pyproject.toml at $TAG has [tool.decdn] gateway-floor '$FLOOR', not X.Y.Z"
@@ -122,7 +132,7 @@ RULE=""
 if [[ -s "$NOTES" ]]; then
   RULE=$'\n---\n\n'
 elif [[ "$PRERELEASE" == false ]]; then
-  die "CHANGELOG.md at $TAG has no '## [$VERSION]' section"
+  die "CHANGELOG.md at $TAG has no '## [$VERSION]' section, or it is empty"
 fi
 INSTALL="$NAME"
 [[ "$PRERELEASE" == false ]] || INSTALL="$NAME==$VERSION"
@@ -155,19 +165,22 @@ fi
 uv run --frozen twine check --strict "${DIST[@]}"
 cp "${DIST[@]}" "$OUT/dist/"
 
-# ---- what PyPI and GitHub have -------------------------------------------
+# ---- what PyPI has -------------------------------------------------------
 
 # PyPI takes the sdist and the wheel as separate uploads, so a failed run can
-# leave one. Only PyPI's 404 means it has no file of this version: any other
-# failure to ask stops here, before the upload.
-ON_PYPI=""
-code=$(curl --silent --show-error --location --output "$SCRATCH/pypi.json" --write-out '%{http_code}' \
+# leave one. A file PyPI has must be the one built here, byte for byte (the
+# build is reproducible): the upload skips it, so a different one would leave
+# the version's files built from different trees. Only PyPI's 404 means it has
+# no file of this version: any other failure to ask stops here.
+code=$(curl --silent --show-error --location --max-time 30 --retry 3 --retry-all-errors \
+  --output "$SCRATCH/pypi.json" --write-out '%{http_code}' \
   "https://pypi.org/pypi/$NAME/$VERSION/json" 2>"$SCRATCH/pypi.err") || code=""
+ON_PYPI=""
 case "$code" in
   200)
     ON_PYPI=$(python3 -c 'import json, sys
 for u in json.load(open(sys.argv[1]))["urls"]:
-    print(u["filename"])' "$SCRATCH/pypi.json") ||
+    print(u["filename"], u["digests"]["sha256"])' "$SCRATCH/pypi.json") ||
       die "cannot read PyPI's answer for $NAME $VERSION" ;;
   404) ;;
   *)
@@ -176,32 +189,23 @@ for u in json.load(open(sys.argv[1]))["urls"]:
 esac
 PENDING=false
 for file in "${DIST[@]}"; do
-  if grep -qxF "${file#dist/}" <<<"$ON_PYPI"; then
-    echo "==> PyPI has ${file#dist/}"
-  else
-    echo "==> PyPI lacks ${file#dist/}"
+  name="${file#dist/}"
+  remote=$(awk -v f="$name" '$1 == f { print $2 }' <<<"$ON_PYPI")
+  if [[ -z "$remote" ]]; then
+    echo "==> PyPI lacks $name"
     PENDING=true
+    continue
   fi
+  local_sha=$(sha256sum "$file" | awk '{ print $1 }')
+  [[ "$remote" == "$local_sha" ]] || die "PyPI has $name with sha256 $remote, but $TAG builds $local_sha.
+The version cannot be finished from this tag: release the next version."
+  echo "==> PyPI has $name, the same file"
 done
-
-# `gh release view` answers a draft too: a draft is not a release, and one for
-# this tag stops the run, before the upload.
-HAS_RELEASE=false
-if draft=$(GH_PROMPT_DISABLED=1 gh release view "$TAG" --repo "$REPO" \
-  --json isDraft --jq .isDraft 2>"$SCRATCH/gh.err"); then
-  [[ "$draft" == false ]] ||
-    die "$REPO has a draft release for $TAG: publish or delete it, then run again"
-  HAS_RELEASE=true
-  echo "==> $REPO has the release $TAG"
-elif ! grep -qx 'release not found' "$SCRATCH/gh.err"; then
-  cat "$SCRATCH/gh.err" >&2
-  die "cannot ask GitHub whether $REPO has the release $TAG"
-fi
 
 cat >"$OUT/outputs" <<EOF
 version=$VERSION
+sha=$SHA
 prerelease=$PRERELEASE
 pending=$PENDING
-has_release=$HAS_RELEASE
 EOF
 echo "==> $NAME $VERSION is ready"

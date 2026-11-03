@@ -10,31 +10,39 @@ name: Publish
 # job trades the job's GitHub OIDC token for a short-lived PyPI token, and its
 # upload carries PEP 740 attestations made from that same identity.
 #
-# The checks below hold only if the workflow that runs them is the reviewed one,
-# so nothing a tag carries runs with the token in reach:
+# The checks in this file hold only if the workflow that runs them is the
+# reviewed one, so nothing a tag carries runs with the token in reach:
 # - The `release` environment allows deployments from `main` only. A run from
 #   a tag or another branch, which runs that ref's copy of this file, never
 #   gets the token. PyPI matches the workflow by file name and environment, not
 #   by ref, so the environment is what holds this.
-# - This file, KEYS and scripts/prepare-publish.sh come from the `main` commit
-#   the run started on, checked out at the workspace root. The tag is checked
-#   out at `src/` and built, never trusted.
+# - This file, KEYS and the scripts come from the `main` commit the run
+#   started on, checked out at the workspace root. The tag is checked out at
+#   `src/`; its code (the gate and the build) runs only after its signature is
+#   checked, only in `prepare`, and nothing it carries decides whether it is
+#   accepted.
+# - Every action is pinned to a commit: a moved tag of an action cannot reach
+#   the jobs that hold a token.
 # `main` is protected by the `Protect defaults` ruleset; org admins bypass it.
 #
-# Three jobs, because `id-token: write` lets every step in its job request an
-# OIDC token, and so a PyPI token. `prepare` runs the tag's code — the gate and
-# the build — with no OIDC access. `publish` holds `id-token: write` and only
-# uploads what `prepare` built. `github-release` holds `contents: write` and
-# only makes the release.
+# Four jobs, because a permission a job holds reaches every step in it:
+# - `prepare` runs the tag's code with no OIDC access and no GitHub token, and
+#   hands the build to `publish` (scripts/prepare-publish.sh).
+# - `release-state` holds `contents: write`, the access GitHub lists draft
+#   releases to, and runs none of the tag's code (scripts/release-state.sh).
+# - `publish` holds `id-token: write` and only uploads what `prepare` built.
+# - `github-release` holds `contents: write` and only makes the release
+#   (scripts/github-release.sh).
 #
 # A PyPI file can never be uploaded again, even after a delete, so nothing is
-# uploaded until the tag carries a signature by a key in KEYS on main, the
-# version agrees across the tag, pyproject.toml and src/decdn/_version.py, the
-# gate and the build pass, and no draft release exists for the tag.
+# uploaded until every check in scripts/prepare-publish.sh passes (among them
+# the signature against KEYS on main, the version, the gate and the build)
+# and no draft release exists for the tag.
 #
-# Re-running is safe. The upload skips the files PyPI already has, and
-# `github-release` is skipped once the release exists, so a run that failed
-# partway finishes the remainder when it is dispatched again.
+# Re-running is safe. The upload skips the files PyPI already has (the same
+# files: prepare-publish.sh stops on one that differs), and `github-release`
+# is skipped once the release exists, so a run that failed partway finishes
+# the remainder when it is dispatched again.
 on:
   workflow_dispatch:
     inputs:
@@ -67,9 +75,9 @@ jobs:
     timeout-minutes: 20
     outputs:
       version: ${{ steps.prepare.outputs.version }}
+      sha: ${{ steps.prepare.outputs.sha }}
       prerelease: ${{ steps.prepare.outputs.prerelease }}
       pending: ${{ steps.prepare.outputs.pending }}
-      has_release: ${{ steps.prepare.outputs.has_release }}
     steps:
       # `publish` would refuse the environment anyway. Failing here says why
       # before any work is done.
@@ -94,13 +102,13 @@ jobs:
           fi
 
       # The trusted tree: this workflow's own commit on main.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # The tag's tree, built but never trusted. Full fetch: `git verify-tag`
-      # needs the annotated tag object.
-      - uses: actions/checkout@v7
+      # The tag's tree. Full fetch: `git verify-tag` needs the annotated tag
+      # object.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ inputs.tag }}
           path: src
@@ -109,18 +117,17 @@ jobs:
 
       # No cache: a release build restores nothing another run could have
       # written.
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.13"
           enable-cache: false
 
       # KEYS comes from main, NOT from the tagged tree: a tag that carried its
       # own KEYS would vouch for itself. The tag reaches the script through
-      # `env`, never inlined into it.
+      # `env`, never inlined into it. No GitHub token is set here.
       - name: Check and build ${{ inputs.tag }}
         id: prepare
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           OUT: ${{ runner.temp }}/out
         run: |
@@ -149,7 +156,15 @@ jobs:
             cat "$OUT/notes.md"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v7
+      - name: Summarise the failure
+        if: failure()
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "### decdn $TAG was not prepared: nothing is uploaded or released. The failing step's log says why." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
           path: |
@@ -160,9 +175,30 @@ jobs:
           # failure. Re-running every job always works: `prepare` builds again.
           retention-days: 7
 
+  release-state:
+    name: Check the GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # GitHub lists draft releases only to callers with push access.
+    permissions:
+      contents: write
+    outputs:
+      has_release: ${{ steps.state.outputs.has_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Ask GitHub for the release of ${{ inputs.tag }}
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: scripts/release-state.sh "$TAG" >> "$GITHUB_OUTPUT"
+
   publish:
     name: Publish to PyPI
-    needs: prepare
+    needs: [prepare, release-state]
     if: ${{ !inputs.dry_run && needs.prepare.outputs.pending == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -175,47 +211,53 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
           path: release
 
       # skip-existing: a file PyPI already has is left alone, so a re-run
-      # uploads only what a failed run did not.
-      - uses: pypa/gh-action-pypi-publish@v1.14.3
+      # uploads only what a failed run did not. prepare-publish.sh has checked
+      # that each such file is the one built here.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: release/dist/
           skip-existing: true
 
   github-release:
     name: Make the GitHub release
-    needs: [prepare, publish]
-    # After an upload, or when PyPI already had every file (`publish` skipped),
-    # but never after a failed upload.
+    needs: [prepare, release-state, publish]
+    # After an upload, or when PyPI already had every file (`publish` skipped
+    # because `pending` is false), but never after a failed upload, and only
+    # when GitHub answered that the tag has no release.
     if: >-
       ${{ always() && !inputs.dry_run
       && needs.prepare.result == 'success'
-      && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
-      && needs.prepare.outputs.has_release != 'true' }}
+      && needs.release-state.result == 'success'
+      && needs.release-state.outputs.has_release == 'false'
+      && (needs.publish.result == 'success'
+          || (needs.publish.result == 'skipped' && needs.prepare.outputs.pending == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
-          path: release
+          path: ${{ runner.temp }}/release
 
+      # The release names the commit `prepare` verified and PyPI has: the
+      # script stops if the tag has moved since.
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-        run: |
-          args=(release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag
-                --title "$TAG" --notes-file release/notes.md)
-          if [ "$PRERELEASE" = true ]; then
-            args+=(--prerelease --latest=false)
-          fi
-          gh "${args[@]}"
+          NOTES: ${{ runner.temp }}/release/notes.md
+        run: scripts/github-release.sh "$TAG" "$SHA" "$NOTES" "$PRERELEASE"

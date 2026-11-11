@@ -44,7 +44,7 @@ async def test_streams_a_blob_from_the_bare_host_verified_readable_by_any_origin
 
 if shipped_after("0.3.1"):  # decdn/decdn#2817
 
-    async def test_lets_any_origin_see_that_a_body_was_decoded_on_the_way(
+    async def test_lets_any_origin_see_a_response_content_encoding(
         contract: Contract, flavour: Driver
     ) -> None:
         c = contract

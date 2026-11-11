@@ -8,13 +8,9 @@ from decdn.client import Client
 from decdn.errors import DecdnError
 from decdn.pointer import PointerDomain
 from tests.conftest import fixture_json
-from tests.fake_gateway import PROOF_BYTES, FakeGateway, checksum
+from tests.fake_gateway import EXPOSED, PROOF_BYTES, FakeGateway, checksum
 from tests.support.host_transport import AsyncHostTransport, HostTransport
 
-EXPOSED = (
-    "Content-Length, Content-Encoding, Content-Range, Accept-Ranges, Content-Type, Content-Disposition, "
-    "ETag, Retry-After, Link"
-)
 CSP = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'"
 TOKEN = "ab" * 32
 

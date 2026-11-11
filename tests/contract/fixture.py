@@ -226,6 +226,24 @@ def fake(mode: Mode) -> tuple[FixtureFile, FakeGateway, Callable[[], None]]:
     return file, gw, listener.close
 
 
+def shipped_after(version: str) -> bool:
+    """Whether the gateway under test carries behaviour decdn shipped after release `version` (`X.Y.Z`).
+
+    `scripts/decdn-contract.sh --tag` names the release it runs in `DECDN_CONTRACT_RELEASE`; the
+    fake and a gateway built from a ref (decdn's own contract run, `--ref`) carry everything. A test
+    gated on it is declared only when this holds: decdn's harness fails a run that skips a test.
+    """
+    release = os.environ.get("DECDN_CONTRACT_RELEASE", "")
+    if not release:
+        return True
+
+    def parse(v: str) -> tuple[int, ...]:
+        return tuple(int(n) for n in v.split("-")[0].split("."))
+
+    # A prerelease of the next version counts as after; the release itself does not.
+    return parse(release) > parse(version)
+
+
 def contract(mode: Mode) -> Contract:
     """The gateway the contract suite runs against in `mode`.
 

@@ -42,6 +42,17 @@ async def test_streams_a_blob_from_the_bare_host_verified_readable_by_any_origin
     assert blake3_hex(await client.read(r)) == c.blob
 
 
+async def test_lets_any_origin_see_that_a_body_was_decoded_on_the_way(
+    contract: Contract, flavour: Driver
+) -> None:
+    c = contract
+    r = await c.fetch(flavour, f"{c.gateway_url}/{c.blob}", headers={"origin": "https://app.example"})
+    assert r.status_code == 200
+    exposed = [h.strip().lower() for h in (r.headers.get("access-control-expose-headers") or "").split(",")]
+    assert "content-encoding" in exposed
+    assert "content-length" in exposed
+
+
 async def test_verifies_an_entry_fetched_through_its_site(contract: Contract, client: Driver) -> None:
     c = contract
     r = await client.get(f"decdn:{c.bundle}/a.txt")

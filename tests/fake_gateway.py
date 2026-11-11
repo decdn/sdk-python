@@ -46,7 +46,8 @@ class Seen:
 
 
 EXPOSED = (
-    "Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition, ETag, Retry-After, Link"
+    "Content-Length, Content-Encoding, Content-Range, Accept-Ranges, Content-Type, Content-Disposition, "
+    "ETag, Retry-After, Link"
 )
 REWRITTEN = re.compile(r"\.(html?|hxt|shtml|css)\Z", re.IGNORECASE | re.ASCII)
 TYPES: dict[str, str] = {

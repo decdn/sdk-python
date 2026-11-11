@@ -81,6 +81,13 @@ between decdn's harness and this suite: a suite change must still read what
 the floor's harness writes, or raise `harness-floor` (see
 [RELEASING.md](RELEASING.md#the-two-floors)).
 
+A contract test for gateway behaviour that no release carries yet is declared
+inside `if shipped_after("X.Y.Z"):`, with `X.Y.Z` the latest release without
+it. `scripts/decdn-contract.sh --tag` names its release in
+`DECDN_CONTRACT_RELEASE`, so an older release never collects the test, and the
+fake and every `--ref` run it. The test is left out rather than skipped:
+decdn's harness fails a run that skips a test.
+
 The vectors in `tests/fixtures` are pinned on the Rust side too: change both
 together.
 

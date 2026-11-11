@@ -12,7 +12,7 @@ from decdn.base32 import hash_to_base32
 from decdn.client import ByteRange, HeadInfo
 from decdn.hashing import blake3_hex
 from decdn.response import ContentRange
-from tests.contract.fixture import Contract, contract
+from tests.contract.fixture import Contract, contract, shipped_after
 from tests.support.flavour import Driver, rejects
 
 pytestmark = pytest.mark.anyio
@@ -40,6 +40,20 @@ async def test_streams_a_blob_from_the_bare_host_verified_readable_by_any_origin
     assert r.headers.get("access-control-allow-origin") == "*"
     assert r.headers.get("x-content-type-options") == "nosniff"
     assert blake3_hex(await client.read(r)) == c.blob
+
+
+if shipped_after("0.3.1"):  # decdn/decdn#2817
+
+    async def test_lets_any_origin_see_a_response_content_encoding(
+        contract: Contract, flavour: Driver
+    ) -> None:
+        c = contract
+        r = await c.fetch(flavour, f"{c.gateway_url}/{c.blob}", headers={"origin": "https://app.example"})
+        assert r.status_code == 200
+        listed = r.headers.get("access-control-expose-headers") or ""
+        exposed = [h.strip().lower() for h in listed.split(",")]
+        assert "content-encoding" in exposed
+        assert "content-length" in exposed
 
 
 async def test_verifies_an_entry_fetched_through_its_site(contract: Contract, client: Driver) -> None:

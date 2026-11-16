@@ -15,7 +15,7 @@ from decdn.errors import DecdnError
 from decdn.manifest import BundleManifest, ManifestEntry
 from decdn.response import ContentRange
 from decdn.uri import DecdnUri
-from tests.fake_gateway import FakeGateway
+from tests.fake_gateway import NO_CAPABILITY, FakeGateway
 from tests.support.flavour import Driver, rejects
 
 pytestmark = pytest.mark.anyio
@@ -112,12 +112,11 @@ async def test_picks_the_context_from_the_gateway_url_and_token(flavour: Driver)
     loop = FakeGateway("loopback")
     c = await flavour.open(gateway_url="http://127.0.0.1:8484", transport=loop.transport())
     assert c.context == "loopback"
-    c = await flavour.open(gateway_url="https://gw.example", token=TOKEN, host="example.com")
+    c = await flavour.open(gateway_url="https://gw.example", token=TOKEN)
     assert c.context == "loopback"
 
 
-async def test_refuses_a_token_without_a_host_and_no_gateway_outside_a_site_page(flavour: Driver) -> None:
-    await rejects(flavour.open(gateway_url="http://127.0.0.1:8484", token=TOKEN), "CONFIG")
+async def test_refuses_a_url_that_names_no_gateway(flavour: Driver) -> None:
     await rejects(flavour.open(gateway_url=""), "CONFIG")
     e = await rejects(flavour.open(gateway_url="not a url"), "CONFIG")
     assert str(e) == "not a gateway URL: not a url"
@@ -608,24 +607,22 @@ def loopback_fake() -> tuple[FakeGateway, BundleManifest, str]:
     fake = FakeGateway("loopback", token=TOKEN)
     bundle = fake.add_bundle({"a.txt": "abc", "index.html": "<p>x</p>"})
     blob = fake.add_blob("loop bytes")
-    fake.scopes.append("example.com")
+    fake.grant()
     return fake, bundle, blob
 
 
-async def open_loop(
-    flavour: Driver, fake: FakeGateway, token: str = TOKEN, host: str = "example.com", **kw: Any
-) -> Driver:
-    return await flavour.open(fake, token=token, host=host, **kw)
+async def open_loop(flavour: Driver, fake: FakeGateway, token: str = TOKEN, **kw: Any) -> Driver:
+    return await flavour.open(fake, token=token, **kw)
 
 
-async def test_sends_the_token_and_host_and_verifies_a_blob(flavour: Driver) -> None:
+async def test_sends_the_token_alone_and_verifies_a_blob(flavour: Driver) -> None:
     fake, _, blob = loopback_fake()
     c = await open_loop(flavour, fake)
     r = await c.get(f"decdn:{blob}")
     assert r.verified is True
     assert await c.text(r) == "loop bytes"
     assert fake.seen[0].headers.get("x-decdn-token") == TOKEN
-    assert fake.seen[0].headers.get("x-decdn-host") == "example.com"
+    assert fake.seen[0].headers.get("x-decdn-host") is None
 
 
 async def test_fetches_an_entry_on_the_bare_host_byte_exact_and_verifies_it(flavour: Driver) -> None:
@@ -640,15 +637,14 @@ async def test_fetches_an_entry_on_the_bare_host_byte_exact_and_verifies_it(flav
     ]
 
 
-async def test_maps_a_wrong_token_to_unauthorized_and_an_uncovered_host_to_payment_required(
+async def test_maps_a_wrong_token_to_unauthorized_and_no_usable_capability_to_payment_required(
     flavour: Driver,
 ) -> None:
     fake, _, blob = loopback_fake()
     await rejects((await open_loop(flavour, fake, "00" * 32)).get(f"decdn:{blob}"), "UNAUTHORIZED")
-    e = await rejects(
-        (await open_loop(flavour, fake, TOKEN, "other.org")).get(f"decdn:{blob}"), "PAYMENT_REQUIRED"
-    )
-    assert e.body == "no capability covers other.org"
+    fake.unfunded_pools.add(fake.capabilities[0].pool)
+    e = await rejects((await open_loop(flavour, fake)).get(f"decdn:{blob}"), "PAYMENT_REQUIRED")
+    assert e.body == NO_CAPABILITY
     assert e.fallback_uri is None
 
 

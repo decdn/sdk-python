@@ -134,7 +134,6 @@ class Core:
         gateway_url: str,
         *,
         token: str | None,
-        host: str | None,
         pointer: PointerDomain | None,
         verify: VerifyMode,
         manifest_cache_size: int,
@@ -148,10 +147,6 @@ class Core:
             raise config(f"not a gateway URL: {gateway_url}")
         hostname = gateway.raw_host.decode("ascii")
         self.context: Context = "loopback" if token is not None or hostname in _LOOPBACK_HOSTS else "public"
-        if token is not None and (host is None or host == ""):
-            raise config(
-                "a loopback token needs `host`: the host whose capability pays, sent as x-decdn-host"
-            )
         self.scheme = gateway.scheme
         self.port = port
         bracketed = f"[{hostname}]" if ":" in hostname else hostname
@@ -159,7 +154,6 @@ class Core:
         self.authority = bracketed if port is None else f"{bracketed}:{port}"
         self.origin = f"{self.scheme}://{self.authority}"
         self.token = token
-        self.host = host
         self.pointer = pointer
         self.verify: VerifyMode = verify
         self.cache_size = manifest_cache_size
@@ -181,9 +175,9 @@ class Core:
 
     def auth_headers(self) -> dict[str, str]:
         """Return the headers every bare-host request carries."""
-        if self.token is None or self.host is None:
+        if self.token is None:
             return {}
-        return {"x-decdn-token": self.token, "x-decdn-host": self.host}
+        return {"x-decdn-token": self.token}
 
     def is_bare(self, url: str) -> bool:
         """Return whether `url` is on the gateway's bare host."""

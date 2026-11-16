@@ -1,8 +1,10 @@
 """The loopback gateway's API
 (https://github.com/decdn/decdn/blob/main/crates/cli/src/commands/gateway.rs):
 
-`GET /_delegate` mints a delegate key, `PUT /_capability` registers a `dcap1:` capability issued
-to it for a scope, `GET /_capability` lists the registered ones (token only).
+`GET /_delegate` returns the gateway's pending delegate key, `PUT /_capability` registers a `dcap1:`
+capability issued to a key the gateway holds, `GET /_capability` lists the registered ones in the
+order the gateway pays with them. Keys and capabilities live in the gateway's memory: a restart
+drops every one.
 """
 
 import json
@@ -27,7 +29,7 @@ class Registration:
     """A capability the gateway took."""
 
     signer: str
-    scope: str
+    pool: str
     # Unix-seconds expiry.
     expiry: int
 
@@ -38,14 +40,11 @@ class RegisteredCapability:
 
     signer: str
     pool: str
-    scope: str
-    # The page origin that registered it, or `None` for the token holder.
-    origin: str | None
     # The spending cap, in USDC base units.
     cap: int
     # Unix-seconds expiry.
     expiry: int
-    # Whether a pull found it spent.
+    # Whether a pull stopped for funding on it; the gateway pays with it no more.
     spent: bool
 
 
@@ -58,8 +57,8 @@ def _headers(has_body: bool) -> dict[str, str]:
     return {"content-type": "application/json"} if has_body else {}
 
 
-def _registration_body(capability: str, scope: str) -> bytes:
-    return json.dumps({"capability": capability, "scope": scope}).encode()
+def _registration_body(capability: str) -> bytes:
+    return json.dumps({"capability": capability}).encode()
 
 
 def _delegate(data: bytes) -> Delegate:
@@ -68,7 +67,7 @@ def _delegate(data: bytes) -> Delegate:
 
 def _registration(data: bytes) -> Registration:
     parsed = json.loads(data)
-    return Registration(signer=parsed["signer"], scope=parsed["scope"], expiry=parsed["expiry"])
+    return Registration(signer=parsed["signer"], pool=parsed["pool"], expiry=parsed["expiry"])
 
 
 def _capabilities(data: bytes) -> list[RegisteredCapability]:
@@ -77,8 +76,6 @@ def _capabilities(data: bytes) -> list[RegisteredCapability]:
         RegisteredCapability(
             signer=i["signer"],
             pool=i["pool"],
-            scope=i["scope"],
-            origin=i["origin"],
             cap=i["cap"],
             expiry=i["expiry"],
             spent=i["spent"],
@@ -103,18 +100,23 @@ class LoopbackApi:
             response.close()
 
     def delegate(self) -> Delegate:
-        """Return a fresh delegate key the gateway holds for 15 minutes unless a capability claims it."""
+        """Return the gateway's pending delegate key, the one to issue the next capability to.
+
+        The gateway holds one pending key: every call returns the same address until a capability
+        claims it, and the next call after that returns a fresh key.
+        """
         return _delegate(self._call("GET", "/_delegate"))
 
-    def register_capability(self, *, capability: str, scope: str) -> Registration:
-        """Register `capability` (a `dcap1:` issued to a delegate) for `scope`.
+    def register_capability(self, capability: str) -> Registration:
+        """Register `capability`, a `dcap1:` issued to a key the gateway holds.
 
-        `scope` is `example.com`, `*.example.com` or `*`.
+        A key holds one capability per pool: a key the gateway does not hold, or a second
+        capability from the same pool on one key, raises `CONFLICT`.
         """
-        return _registration(self._call("PUT", "/_capability", _registration_body(capability, scope)))
+        return _registration(self._call("PUT", "/_capability", _registration_body(capability)))
 
     def capabilities(self) -> list[RegisteredCapability]:
-        """Return the capabilities the gateway holds. Needs the token."""
+        """Return the capabilities the gateway holds, in the order it pays with them."""
         return _capabilities(self._call("GET", "/_capability"))
 
 
@@ -134,13 +136,13 @@ class AsyncLoopbackApi:
             await response.aclose()
 
     async def delegate(self) -> Delegate:
-        """Return a fresh delegate key the gateway holds for 15 minutes unless a capability claims it."""
+        """Return the gateway's pending delegate key: `LoopbackApi`'s."""
         return _delegate(await self._call("GET", "/_delegate"))
 
-    async def register_capability(self, *, capability: str, scope: str) -> Registration:
-        """Register `capability` (a `dcap1:` issued to a delegate) for `scope`: `LoopbackApi`'s."""
-        return _registration(await self._call("PUT", "/_capability", _registration_body(capability, scope)))
+    async def register_capability(self, capability: str) -> Registration:
+        """Register `capability`, a `dcap1:` issued to a key the gateway holds: `LoopbackApi`'s."""
+        return _registration(await self._call("PUT", "/_capability", _registration_body(capability)))
 
     async def capabilities(self) -> list[RegisteredCapability]:
-        """Return the capabilities the gateway holds. Needs the token."""
+        """Return the capabilities the gateway holds, in the order it pays with them."""
         return _capabilities(await self._call("GET", "/_capability"))

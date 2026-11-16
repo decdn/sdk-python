@@ -74,8 +74,9 @@ DECDN_CONTRACT=/path/to/loopback.json DECDN_CONTRACT_REQUIRED=1 uv run pytest te
 ```
 
 The fixture carries extended fields the suite reads when present:
-`capabilities` (loopback: a `dcap1:` token issued to a delegate the gateway
-holds, with the host it is for) and `pointer.namespaces` (public: the
+`capabilities` (loopback: one `{"capability": "dcap1:..."}` per client
+flavour, each from its own pool, every one issued to the gateway's one pending
+key) and `pointer.namespaces` (public: the
 namespaces the signing key owns on the registry). The fixture is a contract
 between decdn's harness and this suite: a suite change must still read what
 the floor's harness writes, or raise `harness-floor` (see

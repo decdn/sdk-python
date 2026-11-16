@@ -2,8 +2,8 @@
 
 - `public`: a gateway with `--public-url`; blobs from the bare host, entries from their site
   host, every request paid by the operator.
-- `loopback`: the local gateway with its token; every request on the bare host, paid by the
-  capability that covers `host`.
+- `loopback`: the local gateway with its token; every request on the bare host, paid with the
+  capabilities the gateway holds.
 
 Both clients plan with the same sans-I/O core and differ only in how they send.
 """
@@ -55,7 +55,7 @@ MAX_RETRY_WAIT_SECS = 86_400
 class Client:
     """A synchronous client over a gateway.
 
-    `token` and `host` open the loopback gateway; so does a gateway on `127.0.0.1`, `localhost`
+    `token` opens the loopback gateway; so does a gateway on `127.0.0.1`, `localhost`
     or `::1`. `transport` stands in for the network (an `httpx.MockTransport` in tests).
     A `Client` is not safe for concurrent use from several threads.
     """
@@ -65,7 +65,6 @@ class Client:
         gateway_url: str,
         *,
         token: str | None = None,
-        host: str | None = None,
         pointer: PointerDomain | None = None,
         transport: httpx.BaseTransport | None = None,
         verify: VerifyMode = "auto",
@@ -75,7 +74,6 @@ class Client:
         self._core = Core(
             gateway_url,
             token=token,
-            host=host,
             pointer=pointer,
             verify=verify,
             manifest_cache_size=manifest_cache_size,
@@ -245,7 +243,6 @@ class AsyncClient:
         gateway_url: str,
         *,
         token: str | None = None,
-        host: str | None = None,
         pointer: PointerDomain | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         verify: VerifyMode = "auto",
@@ -255,7 +252,6 @@ class AsyncClient:
         self._core = Core(
             gateway_url,
             token=token,
-            host=host,
             pointer=pointer,
             verify=verify,
             manifest_cache_size=manifest_cache_size,

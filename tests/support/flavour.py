@@ -120,11 +120,11 @@ class Driver:
             return c.loopback.delegate()
         return await c.loopback.delegate()
 
-    async def loopback_register(self, **kw: Any) -> Any:
+    async def loopback_register(self, capability: str) -> Any:
         c = self.client
         if isinstance(c, Client):
-            return c.loopback.register_capability(**kw)
-        return await c.loopback.register_capability(**kw)
+            return c.loopback.register_capability(capability)
+        return await c.loopback.register_capability(capability)
 
     async def loopback_capabilities(self) -> Any:
         c = self.client

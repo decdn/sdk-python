@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -8,8 +9,16 @@ from decdn.client import Client
 from decdn.errors import DecdnError
 from decdn.pointer import PointerDomain
 from tests.conftest import fixture_json
-from tests.fake_gateway import EXPOSED, PROOF_BYTES, FakeGateway, checksum
+from tests.fake_gateway import (
+    EXPIRY_MARGIN_SECS,
+    EXPOSED,
+    NO_CAPABILITY,
+    PROOF_BYTES,
+    FakeGateway,
+    checksum,
+)
 from tests.support.host_transport import AsyncHostTransport, HostTransport
+from tests.support.postcard import encode_capability
 
 CSP = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'"
 TOKEN = "ab" * 32
@@ -89,11 +98,9 @@ def test_site_serves_entry_with_type() -> None:
     # The loopback bare host serves every text or active type as plain text.
     loopback = FakeGateway("loopback")
     m = loopback.add_bundle({"page.html": "<p>x</p>"})
-    loopback.scopes.append("*")
+    loopback.grant()
     with client(loopback) as c:
-        bare = c.get(
-            f"{loopback.url}/{m.hash}/page.html", headers={"x-decdn-token": TOKEN, "x-decdn-host": "a.test"}
-        )
+        bare = c.get(f"{loopback.url}/{m.hash}/page.html", headers={"x-decdn-token": TOKEN})
         assert (bare.status_code, bare.text) == (200, "<p>x</p>")
         assert bare.headers["content-type"] == "text/plain; charset=utf-8"
         assert "content-security-policy" not in bare.headers
@@ -184,28 +191,42 @@ def test_loopback_needs_token_401() -> None:
         assert fake.url == "http://127.0.0.1:8484"
         r = c.get(f"{fake.url}/{h}")
         assert (r.status_code, r.text) == (401, "token required\n")
-        r = c.get(f"{fake.url}/{h}", headers={"x-decdn-token": TOKEN})
-        assert (r.status_code, r.text) == (401, "page host required\n")
         r = c.get(f"{site}/a.txt")
         assert (r.status_code, r.text) == (401, "token required outside a browser\n")
         assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "cross-site"}).status_code == 403
+        # A site pays with the held capabilities, as a content request does.
+        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-origin"}).status_code == 402
+        fake.grant()
         assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-origin"}).text == "x"
         assert c.get("http://localhost:8484/").text == "<h1>decdn gateway</h1>"
         assert "access-control-allow-origin" not in r.headers
 
 
-def test_loopback_uncovered_host_402_text() -> None:
+def test_loopback_pays_with_the_first_usable_capability_in_registration_order() -> None:
     fake = FakeGateway("loopback")
     h = fake.add_blob("hello")
-    headers = {"x-decdn-token": TOKEN, "x-decdn-host": "App.Example.com"}
+    auth = {"x-decdn-token": TOKEN}
     with client(fake) as c:
-        r = c.get(f"{fake.url}/{h}", headers=headers)
-        assert (r.status_code, r.text) == (402, "no capability covers app.example.com\n")
+        r = c.get(f"{fake.url}/{h}", headers=auth)
+        assert (r.status_code, r.text) == (402, f"{NO_CAPABILITY}\n")
         assert r.headers["content-type"] == "text/plain; charset=utf-8"
-        fake.scopes.append("*.example.com")
-        r = c.get(f"{fake.url}/{h}", headers=headers)
+        # Inside the expiry margin, spent, then one whose pool stops for funding: the fourth pays.
+        near = fake.grant("0x" + "01" * 32, expiry=int(time.time()) + EXPIRY_MARGIN_SECS)
+        spent = fake.grant("0x" + "02" * 32)
+        spent.spent = True
+        drained = fake.grant("0x" + "03" * 32)
+        fake.unfunded_pools.add(drained.pool)
+        paying = fake.grant("0x" + "04" * 32)
+        r = c.get(f"{fake.url}/{h}", headers=auth)
         assert (r.status_code, r.content) == (200, b"hello")
+        assert [g.spent for g in (near, spent, drained, paying)] == [False, True, True, False]
         assert fake.allowance == 2**53 - 1
+        paying.spent = True
+        assert c.get(f"{fake.url}/{h}", headers=auth).status_code == 402
+        # A blob the cache holds whole costs no pull, so it needs no capability.
+        fake.cached.add(h)
+        r = c.get(f"{fake.url}/{h}", headers=auth)
+        assert (r.status_code, r.content) == (200, b"hello")
 
 
 def test_allowance_402_json_and_retry_after() -> None:
@@ -237,7 +258,7 @@ def test_allowance_402_json_and_retry_after() -> None:
         r = c.get(f"{unfunded.url}/{h3}")
         assert r.status_code == 503
         assert r.json() == {
-            "error": "the gateway's pool cannot pay right now",
+            "error": "the gateway cannot pay right now",
             "uri": f"decdn:{h3}",
             "retry_after_secs": 60,
         }
@@ -249,51 +270,91 @@ def test_delegate_register_list_409s() -> None:
     signer = cap["signer"]
     fake = FakeGateway("loopback")
     auth = {"x-decdn-token": TOKEN}
-    body = json.dumps({"capability": cap["token"], "scope": "example.com"})
+    body = json.dumps({"capability": cap["token"]})
     with client(fake) as c:
-        assert c.get(f"{fake.url}/_delegate").status_code == 403
-        r = c.get(f"{fake.url}/_delegate", headers=auth)
+        # The API takes no token.
+        r = c.get(f"{fake.url}/_delegate")
         address = r.json()["address"]
         assert address == checksum(address.lower())
-        assert address.lower() in fake.delegates
-        r = c.put(f"{fake.url}/_capability", headers=auth, content=body)
+        assert fake.pending == address.lower()
+        assert c.get(f"{fake.url}/_delegate").json() == {"address": address}
+        r = c.put(f"{fake.url}/_capability", content=body)
         assert (r.status_code, r.text) == (
             409,
-            "the capability names no delegate this gateway is holding: get one from GET /_delegate\n",
+            "the capability names no key this gateway holds: get one from GET /_delegate\n",
         )
-        fake.delegates[signer] = None
-        r = c.put(f"{fake.url}/_capability", headers=auth, content=body)
+        fake.pend(signer)
+        r = c.put(f"{fake.url}/_capability", content=body)
         assert r.status_code == 201
-        assert r.text == f'{{"signer":"{checksum(signer)}","scope":"example.com","expiry":1900000000}}'
-        assert fake.scopes == ["example.com"]
-        r = c.put(f"{fake.url}/_capability", headers=auth, content=body)
+        assert r.text == f'{{"expiry":1900000000,"pool":"{cap["poolId"]}","signer":"{checksum(signer)}"}}'
+        assert fake.pending is None
+        r = c.put(f"{fake.url}/_capability", content=body)
         assert (r.status_code, r.text) == (
             409,
-            "that delegate already holds a capability: get a new one from GET /_delegate\n",
+            "that key already holds a capability from this pool: get a new key from GET /_delegate\n",
         )
-        listed = c.get(f"{fake.url}/_capability", headers=auth)
+        # The same key takes a capability from another pool.
+        other = issue(cap, pool="0x" + "c4" * 32)
+        assert c.put(f"{fake.url}/_capability", content=json.dumps({"capability": other})).status_code == 201
+        listed = c.get(f"{fake.url}/_capability")
         assert listed.text == (
-            f'[{{"signer":"{checksum(signer)}","pool":"{cap["poolId"]}","scope":"example.com",'
-            f'"origin":null,"cap":10000000,"expiry":1900000000,"spent":false}}]'
+            f'[{{"cap":10000000,"expiry":1900000000,"pool":"{cap["poolId"]}",'
+            f'"signer":"{checksum(signer)}","spent":false}},'
+            f'{{"cap":10000000,"expiry":1900000000,"pool":"0x{"c4" * 32}",'
+            f'"signer":"{checksum(signer)}","spent":false}}]'
         )
-        assert c.get(f"{fake.url}/_capability").status_code == 401
-        page = {"origin": "http://app.example.com"}
-        r = c.put(f"{fake.url}/_capability", headers=page, content=body)
-        assert (r.status_code, r.text) == (403, "a page registers only a scope that covers itself\n")
-        assert r.headers["access-control-allow-origin"] == "http://app.example.com"
-        assert r.headers["vary"] == "Origin"
-        r = c.put(f"{fake.url}/_capability", headers=auth, content='{"scope":"x"}')
-        assert (r.status_code, r.text) == (422, 'expected {"capability", "scope"}\n')
-        bad_scope = json.dumps({"capability": cap["token"], "scope": "Bad_Scope"})
-        assert (
-            c.put(f"{fake.url}/_capability", headers=auth, content=bad_scope).text
-            == "invalid scope Bad_Scope\n"
-        )
-        preflight = c.options(f"{fake.url}/_capability", headers=page)
-        assert preflight.status_code == 204
-        assert preflight.headers["access-control-allow-private-network"] == "true"
-        assert preflight.headers["access-control-allow-methods"] == "GET, PUT"
-        assert c.options(f"{fake.url}/x", headers=page).text == "no cross-origin access\n"
+        # Expired capabilities drop out of the list.
+        fake.capabilities[0].expiry = int(time.time())
+        assert len(c.get(f"{fake.url}/_capability", headers=auth).json()) == 1
+        fresh = c.get(f"{fake.url}/_delegate").json()["address"]
+        assert fresh.lower() not in (signer, address.lower())
+
+
+def test_register_422s() -> None:
+    cap = fixture_json("capability")
+    fake = FakeGateway("loopback")
+    fake.pend(cap["signer"])
+
+    def put(body: str) -> httpx.Response:
+        with client(fake) as c:
+            return c.put(f"{fake.url}/_capability", content=body)
+
+    r = put(json.dumps({"capability": cap["token"], "scope": "example.com"}))
+    assert (r.status_code, r.text) == (422, 'expected {"capability"}\n')
+    assert put('{"scope":"x"}').status_code == 422
+    assert put('{"capability":7}').status_code == 422
+    assert put("nope").status_code == 422
+    assert put(json.dumps({"capability": "dcap1:AAAA"})).status_code == 422
+    r = put(json.dumps({"capability": issue(cap, cap_=0)}))
+    assert (r.status_code, r.text) == (422, "the capability's cap is 0\n")
+    soon = int(time.time()) + EXPIRY_MARGIN_SECS
+    r = put(json.dumps({"capability": issue(cap, expiry=soon)}))
+    assert (r.status_code, r.text) == (422, "the capability expires inside the expiry margin\n")
+    assert put(json.dumps({"capability": cap["token"] + " " * 70_000})).status_code == 413
+    assert fake.capabilities == []
+
+
+def test_loopback_answers_no_preflight() -> None:
+    fake = FakeGateway("loopback")
+    page = {"origin": "http://app.example.com", "access-control-request-method": "PUT"}
+    with client(fake) as c:
+        for path in ("/_capability", "/_delegate", "/x"):
+            r = c.options(f"{fake.url}{path}", headers=page)
+            assert (r.status_code, r.text) == (403, "no cross-origin access\n")
+            assert "access-control-allow-origin" not in r.headers
+
+
+def issue(
+    cap: dict[str, str], *, pool: str | None = None, cap_: int | None = None, expiry: int | None = None
+) -> str:
+    """The fixture capability with `pool`, `cap_` or `expiry` replaced."""
+    return encode_capability(
+        pool or cap["poolId"],
+        cap["signer"],
+        int(cap["spendingCap"]) if cap_ is None else cap_,
+        int(cap["expiry"]) if expiry is None else expiry,
+        bytes.fromhex(cap["ownerSignature"].removeprefix("0x")),
+    )
 
 
 def test_put_pointer_201_409_403() -> None:
@@ -419,14 +480,11 @@ async def test_listen_serves_an_async_client() -> None:
     try:
         async with httpx.AsyncClient(transport=AsyncHostTransport(listener.address)) as c:
             r = await c.get(f"{fake.url}/{h}", headers={"x-decdn-token": fake.token})
-            assert (r.status_code, r.text) == (401, "page host required\n")
-            fake.scopes.append("example.com")
-            r = await c.get(
-                f"{fake.url}/{h}", headers={"x-decdn-token": fake.token, "x-decdn-host": "example.com"}
-            )
+            assert r.status_code == 402
+            fake.grant()
+            r = await c.get(f"{fake.url}/{h}", headers={"x-decdn-token": fake.token})
             assert (r.status_code, r.content) == (200, b"hello")
-            body = json.dumps({"capability": "nope", "scope": "example.com"})
-            r = await c.put(f"{fake.url}/_capability", content=body, headers={"x-decdn-token": fake.token})
+            r = await c.put(f"{fake.url}/_capability", content=json.dumps({"capability": "nope"}))
             assert r.status_code == 422
     finally:
         listener.close()

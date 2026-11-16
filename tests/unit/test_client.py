@@ -23,8 +23,10 @@ pytestmark = pytest.mark.anyio
 TOKEN = "cd" * 32
 
 
-def public_fake(allowance_bytes: int | None = None) -> tuple[FakeGateway, BundleManifest, str]:
-    fake = FakeGateway("public", allowance_bytes=allowance_bytes)
+def public_fake() -> tuple[FakeGateway, BundleManifest, str]:
+    """A public fake holding one capability, so its pulls are paid."""
+    fake = FakeGateway("public")
+    fake.grant()
     bundle = fake.add_bundle(
         {
             "a.txt": "abc",
@@ -239,13 +241,16 @@ async def test_maps_a_range_past_the_end_to_range_not_satisfiable_with_the_size(
     assert e.status == 416
 
 
-async def test_maps_a_spent_allowance_to_payment_required_with_the_fallback_uri(flavour: Driver) -> None:
-    fake, _, blob = public_fake(0)
+async def test_maps_a_public_gateway_with_no_capability_to_pool_unfunded_with_the_fallback_uri(
+    flavour: Driver,
+) -> None:
+    fake = FakeGateway("public")
+    blob = fake.add_blob("x")
     c = await flavour.open(fake)
-    e = await rejects(c.get(f"decdn:{blob}?ns=7"), "PAYMENT_REQUIRED")
-    assert e.status == 402
+    e = await rejects(c.get(f"decdn:{blob}?ns=7"), "POOL_UNFUNDED")
+    assert e.status == 503
     assert e.fallback_uri == f"decdn:{blob}?ns=7"
-    assert e.retry_after_secs is not None and e.retry_after_secs > 0
+    assert e.retry_after_secs == 60
 
 
 async def test_maps_a_pool_that_cannot_pay_to_pool_unfunded(flavour: Driver) -> None:
@@ -271,18 +276,19 @@ async def test_retries_once_after_retry_after_when_asked(
 
 
 async def test_retry_cap_refuses_long_wait(flavour: Driver, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake, _, blob = public_fake(0)
-    monkeypatch.setattr(fake, "_seconds_to_midnight", lambda: 3600)
+    fake, _, blob = public_fake()
+    fake.unfunded.add(blob)
     waits = on_sleep(monkeypatch, flavour)
     c = await flavour.open(fake)
-    e = await rejects(c.get(f"decdn:{blob}", retry=1.0), "PAYMENT_REQUIRED")
-    assert e.retry_after_secs == 3600
+    e = await rejects(c.get(f"decdn:{blob}", retry=1.0), "POOL_UNFUNDED")
+    assert e.retry_after_secs == 60
     assert waits == []
     assert len(fake.seen) == 1
 
 
 async def test_a_ranged_request_answered_200_is_a_whole_body(flavour: Driver) -> None:
     fake = FakeGateway("public")
+    fake.grant()
     data = bytes(range(40))
     bundle = fake.add_bundle({"big.bin": data})
     fake.whole.add(entry_of(bundle, "big.bin").hash)
@@ -298,7 +304,7 @@ async def test_retry_never_sleeps_without_retry_after(
     flavour: Driver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for retry in (True, 5.0):
-        fake, _, blob = public_fake(0)
+        fake, _, blob = public_fake()
 
         def handle(request: httpx.Request, fake: FakeGateway = fake) -> httpx.Response:
             fake.handle(request)
@@ -535,9 +541,10 @@ async def test_reads_a_raw_blobs_size_and_hash_from_head(flavour: Driver) -> Non
 
 
 async def test_maps_a_raw_blobs_head_refusals_as_its_gets(flavour: Driver) -> None:
-    fake, _, blob = public_fake(0)
+    fake = FakeGateway("public")
+    blob = fake.add_blob("x")
     c = await flavour.open(fake)
-    await rejects(c.head(f"decdn:{blob}"), "PAYMENT_REQUIRED")
+    await rejects(c.head(f"decdn:{blob}"), "POOL_UNFUNDED")
     funded, _, funded_blob = public_fake()
     funded.unfunded.add(funded_blob)
     d = await flavour.open(funded)
@@ -545,35 +552,26 @@ async def test_maps_a_raw_blobs_head_refusals_as_its_gets(flavour: Driver) -> No
 
 
 def test_pays_a_raw_blobs_proof_once_under_a_sites_decdn_too() -> None:
-    fake, bundle, blob = public_fake(1 << 20)
+    fake, bundle, blob = public_fake()
     site = f"http://{hash_to_base32(bundle.hash)}.decdn.test"
     with httpx.Client(transport=fake.transport()) as http:
         for _ in range(2):
             r = http.head(f"{site}/_decdn/{blob}")
             assert r.status_code == 200
             assert r.headers.get("content-length") == "11"
-    assert fake.allowance == (1 << 20) - 16 * 1024
+            # A proven size answers with nothing that can pay.
+            fake.capabilities[0].spent = True
 
 
 async def test_answers_the_empty_blob_with_no_proof(flavour: Driver) -> None:
-    fake, _, _ = public_fake(1)
+    fake = FakeGateway("public")
     empty = fake.add_blob("")
     c = await flavour.open(fake)
     assert (await c.head(f"decdn:{empty}")).size == 0
+    fake.grant()
     r = await c.get(f"decdn:{empty}")
     assert r.content_length == 0
     assert await c.read(r) == b""
-    assert fake.allowance == 1
-
-
-def test_admits_a_window_of_a_raw_blob_by_its_chunk_group_span() -> None:
-    fake, _, _ = public_fake(32 * 1024)
-    big = fake.add_blob(bytes(64 * 1024))
-    with httpx.Client(transport=fake.transport()) as http:
-        r = http.get(f"http://decdn.test/{big}", headers={"range": "bytes=0-0"})
-    assert r.status_code == 206
-    assert r.headers.get("content-range") == f"bytes 0-0/{64 * 1024}"
-    assert fake.allowance == 0
 
 
 async def test_serves_a_bundle_as_its_site_index_unverified(flavour: Driver) -> None:

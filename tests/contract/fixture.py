@@ -183,6 +183,8 @@ def fake(mode: Mode) -> tuple[FixtureFile, FakeGateway, Callable[[], None]]:
         "blobBytes": blob_bytes.hex(),
     }
     if mode == "public":
+        # decdn's harness registers the public gateway's capability before the suite runs.
+        gw.grant()
         p = fixture_json("pointer")
         gw.pointer_domain = PointerDomain(chain_id=p["chainId"], publisher_registry=p["publisherRegistry"])
         gw.owners[7] = p["address"].lower()

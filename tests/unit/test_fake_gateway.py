@@ -10,10 +10,10 @@ from decdn.errors import DecdnError
 from decdn.pointer import PointerDomain
 from tests.conftest import fixture_json
 from tests.fake_gateway import (
+    CANNOT_PAY,
     EXPIRY_MARGIN_SECS,
     EXPOSED,
     NO_CAPABILITY,
-    PROOF_BYTES,
     FakeGateway,
     checksum,
 )
@@ -28,6 +28,13 @@ def client(fake: FakeGateway, *, follow: bool = False) -> httpx.Client:
     return httpx.Client(transport=fake.transport(), follow_redirects=follow)
 
 
+def funded_public() -> FakeGateway:
+    """A public fake holding one capability, so its pulls are paid."""
+    fake = FakeGateway("public")
+    fake.grant()
+    return fake
+
+
 def test_checksum_spells_addresses_eip55() -> None:
     assert (
         checksum("0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed") == "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
@@ -36,7 +43,7 @@ def test_checksum_spells_addresses_eip55() -> None:
 
 
 def test_public_blob_200_with_cors() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     h = fake.add_blob("hello")
     with client(fake) as c:
         r = c.get(f"{fake.url}/{h}")
@@ -57,13 +64,13 @@ def test_public_blob_200_with_cors() -> None:
         pointer = c.options(f"{fake.url}/_pointer")
         assert pointer.headers["access-control-allow-methods"] == "PUT"
         assert pointer.headers["access-control-allow-headers"] == "content-type"
-        assert c.options(f"{fake.url}/_delegate").text == "a public gateway has no API\n"
+        assert c.options(f"{fake.url}/_delegate").status_code == 204
     assert [s.method for s in fake.seen] == ["GET", "OPTIONS", "OPTIONS", "OPTIONS"]
     assert fake.seen[0].url == f"{fake.url}/{h}"
 
 
 def test_public_bundle_redirects_to_site() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     m = fake.add_bundle({"index.html": "<p>hi</p>", "a b.txt": "x"})
     label = hash_to_base32(m.hash)
     with client(fake) as c:
@@ -76,7 +83,7 @@ def test_public_bundle_redirects_to_site() -> None:
 
 
 def test_site_serves_entry_with_type() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     m = fake.add_bundle({"a.txt": "x", "d/data.json": "{}", "blob.bin": b"\x00\x01"})
     site = f"http://{hash_to_base32(m.hash)}.decdn.test"
     with client(fake) as c:
@@ -107,7 +114,7 @@ def test_site_serves_entry_with_type() -> None:
 
 
 def test_site_rewrites_html_and_sets_csp() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     img = fake.add_blob(b"\x89PNG")
     m = fake.add_bundle({"index.html": f'<img src="decdn:{img}">', "s/style.css": f"a{{b:url(decdn:{img})}}"})
     site = f"http://{hash_to_base32(m.hash)}.decdn.test"
@@ -130,7 +137,7 @@ def test_site_rewrites_html_and_sets_csp() -> None:
 
 
 def test_range_206_and_416() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     h = fake.add_blob("0123456789")
     with client(fake) as c:
         r = c.get(f"{fake.url}/{h}", headers={"range": "bytes=2-4"})
@@ -150,7 +157,7 @@ def test_range_206_and_416() -> None:
 
 
 def test_head_etag() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     h = fake.add_blob("hello")
     m = fake.add_bundle({"a.txt": "x"})
     with client(fake) as c:
@@ -170,7 +177,7 @@ def test_head_etag() -> None:
 
 
 def test_unknown_host_403() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     with client(fake) as c:
         r = c.get("http://other.test/")
         assert (r.status_code, r.text) == (403, "unknown Host\n")
@@ -220,7 +227,6 @@ def test_loopback_pays_with_the_first_usable_capability_in_registration_order() 
         r = c.get(f"{fake.url}/{h}", headers=auth)
         assert (r.status_code, r.content) == (200, b"hello")
         assert [g.spent for g in (near, spent, drained, paying)] == [False, True, True, False]
-        assert fake.allowance == 2**53 - 1
         paying.spent = True
         assert c.get(f"{fake.url}/{h}", headers=auth).status_code == 402
         # A blob the cache holds whole costs no pull, so it needs no capability.
@@ -229,40 +235,51 @@ def test_loopback_pays_with_the_first_usable_capability_in_registration_order() 
         assert (r.status_code, r.content) == (200, b"hello")
 
 
-def test_allowance_402_json_and_retry_after() -> None:
-    fake = FakeGateway("public", allowance_bytes=PROOF_BYTES + 10)
+def test_public_nothing_pays_503_json_and_retry_after() -> None:
+    fake = FakeGateway("public")
     h = fake.add_blob("0123456789")
+    m = fake.add_bundle({"a.txt": "x"})
+    site = f"http://{hash_to_base32(m.hash)}.decdn.test"
     with client(fake) as c:
-        assert c.get(f"{fake.url}/{h}").status_code == 200
-        assert fake.allowance == 0
+        for r in (c.get(f"{fake.url}/{h}"), c.head(f"{fake.url}/{h}"), c.get(f"{site}/a.txt")):
+            assert r.status_code == 503
+            assert r.headers["retry-after"] == "60"
+            assert r.headers["content-type"] == "application/json"
         r = c.get(f"{fake.url}/{h}")
-        assert r.status_code == 402
-        body = r.json()
-        assert body["error"] == "the gateway's allowance is spent for today"
-        assert body["uri"] == f"decdn:{h}"
-        assert 0 < body["retry_after_secs"] <= 86400
-        assert r.headers["retry-after"] == str(body["retry_after_secs"])
+        assert r.text == f'{{"error":"{CANNOT_PAY}","retry_after_secs":60,"uri":"decdn:{h}"}}'
         assert r.headers["link"] == f'<decdn:{h}>; rel="alternate"'
-        assert r.headers["content-type"] == "application/json"
-    small = FakeGateway("public", allowance_bytes=PROOF_BYTES + 5)
-    h2 = small.add_blob("0123456789")
-    with client(small) as c:
-        r = c.get(f"{small.url}/{h2}")
-        assert r.status_code == 402
-        assert r.json()["retry_after_secs"] == 0
-        assert r.headers["retry-after"] == "0"
-    unfunded = FakeGateway("public")
-    h3 = unfunded.add_blob("x")
-    unfunded.unfunded.add(h3)
-    with client(unfunded) as c:
-        r = c.get(f"{unfunded.url}/{h3}")
-        assert r.status_code == 503
-        assert r.json() == {
-            "error": "the gateway cannot pay right now",
-            "uri": f"decdn:{h3}",
-            "retry_after_secs": 60,
-        }
-        assert r.headers["retry-after"] == "60"
+        # A blob the cache holds whole is served with nothing that can pay.
+        fake.cached.add(h)
+        assert c.get(f"{fake.url}/{h}").content == b"0123456789"
+        held = fake.grant()
+        assert c.get(f"{site}/a.txt").text == "x"
+        # A pull no capability can pay leaves the capabilities usable.
+        fake.unfunded.add(h)
+        fake.cached.clear()
+        assert c.get(f"{fake.url}/{h}").status_code == 503
+        assert held.spent is False
+
+
+def test_public_capability_api_on_the_bare_host() -> None:
+    cap = fixture_json("capability")
+    fake = FakeGateway("public")
+    with client(fake) as c:
+        r = c.get(f"{fake.url}/_delegate")
+        assert r.status_code == 200
+        assert r.headers["access-control-allow-origin"] == "*"
+        fake.pend(cap["signer"])
+        r = c.put(f"{fake.url}/_capability", content=json.dumps({"capability": cap["token"]}))
+        assert r.status_code == 201
+        listed = c.get(f"{fake.url}/_capability").json()
+        assert [e["pool"] for e in listed] == [cap["poolId"]]
+        assert c.get(f"{fake.url}/_status").json() == {"capabilities": listed}
+        preflight = c.options(f"{fake.url}/_capability")
+        assert preflight.status_code == 204
+        assert preflight.headers["access-control-allow-methods"] == "GET, PUT"
+        site = f"http://{hash_to_base32('ab' * 32)}.decdn.test"
+        for path in ("/_delegate", "/_capability", "/_status"):
+            assert c.get(f"{site}{path}").status_code == 404
+            assert c.options(f"{site}{path}").status_code == 404
 
 
 def test_delegate_register_list_409s() -> None:
@@ -362,7 +379,7 @@ def test_put_pointer_201_409_403() -> None:
     body = json.dumps(
         {"namespace": p["namespace"], "root": f"0x{p['root']}", "seq": p["seq"], "signature": p["signature"]}
     )
-    fake = FakeGateway("public")
+    fake = funded_public()
     with client(fake) as c:
         assert (c.put(f"{fake.url}/_pointer", content=body).status_code) == 502
         fake.pointer_domain = PointerDomain(chain_id=p["chainId"], publisher_registry=p["publisherRegistry"])
@@ -395,7 +412,7 @@ def test_put_pointer_201_409_403() -> None:
 
 
 def test_truncated_and_tampered_blobs() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     cut = fake.add_blob("0123456789")
     flipped = fake.add_blob("abc")
     lying = fake.add_blob("hello")
@@ -419,7 +436,7 @@ def test_truncated_and_tampered_blobs() -> None:
 
 @pytest.mark.anyio
 async def test_transport_serves_an_async_client() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     h = fake.add_blob("hello")
     cut = fake.add_blob("0123456789")
     fake.truncated.add(cut)
@@ -434,7 +451,7 @@ async def test_transport_serves_an_async_client() -> None:
 
 
 def test_listen_serves_over_a_socket() -> None:
-    fake = FakeGateway("public")
+    fake = funded_public()
     h = fake.add_blob("hello")
     cut = fake.add_blob("0123456789")
     fake.truncated.add(cut)

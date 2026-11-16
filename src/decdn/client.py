@@ -1,7 +1,7 @@
 """The clients: `Client` and `AsyncClient`, one of two contexts over a `decdn gateway`.
 
 - `public`: a gateway with `--public-url`; blobs from the bare host, entries from their site
-  host, every request paid by the operator.
+  host, every request paid with the capabilities the gateway holds.
 - `loopback`: the local gateway with its token; every request on the bare host, paid with the
   capabilities the gateway holds.
 

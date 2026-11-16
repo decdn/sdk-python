@@ -3,10 +3,9 @@
 from typing import Literal
 
 ErrorCode = Literal[
-    # 402: the gateway's allowance is spent, or the content does not fit what is left,
-    # or no capability the loopback gateway holds can pay.
+    # 402: no capability the loopback gateway holds can pay.
     "PAYMENT_REQUIRED",
-    # 503: the gateway's pool cannot pay.
+    # 503: no capability the public gateway holds can pay.
     "POOL_UNFUNDED",
     # 404.
     "NOT_FOUND",

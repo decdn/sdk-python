@@ -82,7 +82,7 @@ The client talks to one of two kinds of gateway:
 
 | Gateway                                                  | Where it runs                          | Who pays                                          |
 | -------------------------------------------------------- | -------------------------------------- | ------------------------------------------------- |
-| Public (`decdn gateway --public-url https://decdn.link`) | Anywhere with network access           | The operator's pool, within a daily allowance     |
+| Public (`decdn gateway --public-url https://decdn.link`) | Anywhere with network access           | The capabilities registered with the gateway      |
 | Loopback (`decdn gateway`, `http://127.0.0.1:8484`)      | The same machine, with the gateway token | The capabilities registered with the gateway      |
 
 The gateway's HTTP contract is
@@ -136,6 +136,12 @@ async with AsyncClient("https://decdn.link") as client:
     async for chunk in streamed.iter_bytes():
         ...
 ```
+
+A public gateway pays with the capabilities its operator registered on it, in
+the order they were registered. When none can pay, a request the gateway must
+pull fails with `POOL_UNFUNDED`, carrying `retry_after_secs` and the
+`fallback_uri` to fetch with a paying client of your own; a response its cache
+holds whole still comes, at no cost.
 
 `ByteRange` takes an `offset` and, optionally, a `length`. A response is a context manager
 too; leaving the block closes the connection if the body was not read.
@@ -207,8 +213,8 @@ Every failure is a `DecdnError` with a stable `code`:
 
 | Code                    | When                                                                                                |
 | ----------------------- | --------------------------------------------------------------------------------------------------- |
-| `PAYMENT_REQUIRED`      | 402: the allowance is spent, the entry does not fit what is left, or no held capability can pay     |
-| `POOL_UNFUNDED`         | 503: the gateway's pool cannot pay                                                                  |
+| `PAYMENT_REQUIRED`      | 402: no capability the loopback gateway holds can pay                                               |
+| `POOL_UNFUNDED`         | 503: no capability the public gateway holds can pay                                                 |
 | `NOT_FOUND`             | 404                                                                                                 |
 | `RANGE_NOT_SATISFIABLE` | 416: the range starts past the end; `size` holds the entry's size                                   |
 | `UNAUTHORIZED`          | 401: the loopback token is missing or wrong                                                         |

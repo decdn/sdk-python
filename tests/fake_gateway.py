@@ -10,7 +10,6 @@ fails CI.
 
 import dataclasses
 import json
-import math
 import re
 import secrets
 import socket
@@ -162,14 +161,6 @@ def _window(range_: str | None, size: int) -> tuple[int, int] | Literal["unsatis
     return (start, end - start + 1)
 
 
-def _group_span(window: tuple[int, int], size: int) -> int:
-    """The bytes a pull of `window` pays for: the window widened to whole chunk groups, within `size`."""
-    offset, length = window
-    start = offset // CHUNK_GROUP_BYTES * CHUNK_GROUP_BYTES
-    end = min(-(-(offset + length) // CHUNK_GROUP_BYTES) * CHUNK_GROUP_BYTES, size)
-    return end - start
-
-
 def _js_length(s: str) -> int:
     """The length of `s` in UTF-16 code units, as JavaScript counts a string."""
     return len(s.encode("utf-16-le", errors="surrogatepass")) // 2
@@ -177,19 +168,19 @@ def _js_length(s: str) -> int:
 
 MAX_BODY = 64 * 1024
 """The largest API body the gateway reads (64 KiB)."""
-CHUNK_GROUP_BYTES = 16 * 1024
-"""The unit a pull pays for: a chunk group (16 KiB)."""
-PROOF_BYTES = CHUNK_GROUP_BYTES
-"""What a raw blob's size proof spends of the allowance: one chunk group."""
 EXPIRY_MARGIN_SECS = 420
 """How long before its expiry nodes stop taking a capability: one redeem interval and 120 s."""
 NO_CAPABILITY = "the gateway holds no capability that can pay: register one with PUT /_capability"
 """The loopback 402's text, less its newline, for a pull no held capability can pay."""
+CANNOT_PAY = "the gateway cannot pay right now"
+"""The public 503's `error`, for a pull no held capability can pay."""
+API = ("/_delegate", "/_capability", "/_status")
+"""The capability API paths, on the bare host of either kind of gateway."""
 
 
 @dataclass
 class Registered:
-    """A capability a loopback delegate key holds; `signer` and `pool` lowercase."""
+    """A capability a delegate key holds; `signer` and `pool` lowercase."""
 
     signer: str
     pool: str
@@ -236,14 +227,12 @@ class FakeGateway:
         mode: FakeMode,
         *,
         host: str | None = None,
-        allowance_bytes: int | None = None,
         token: str | None = None,
     ) -> None:
-        """Make a fake.
+        """Make a fake, holding no capability.
 
         `host` is `host[:port]` of the bare host, by default `decdn.test` (public) or
-        `127.0.0.1:8484` (loopback). `allowance_bytes` is the bytes the public gateway delivers
-        before it answers 402. `token` is the loopback token.
+        `127.0.0.1:8484` (loopback). `token` is the loopback token.
         """
         self.mode: FakeMode = mode
         # `host[:port]` of the bare host; settable so a listener can name the port it got.
@@ -254,10 +243,9 @@ class FakeGateway:
         self.blobs: dict[str, bytes] = {}
         # The raw blobs whose size a proof here proved.
         self._proven: set[str] = set()
-        # Hashes whose pull the pool cannot pay: 503.
+        # Hashes whose pull no held capability can pay, which leaves the capabilities usable.
         self.unfunded: set[str] = set()
-        # Raw blobs the gateway's cache holds whole: a loopback gateway serves them with no
-        # capability.
+        # Raw blobs the gateway's cache holds whole: served with no capability.
         self.cached: set[str] = set()
         # Hashes served with one byte flipped.
         self.tampered: set[str] = set()
@@ -270,11 +258,11 @@ class FakeGateway:
         # Namespace pointers: namespace id → bundle hash.
         self.pointers: dict[int, str] = {}
         self.seen: list[Seen] = []
-        # Loopback delegate keys the gateway holds, lowercase.
+        # Delegate keys the gateway holds, lowercase.
         self.keys: set[str] = set()
         # The held key no capability claims yet, which `GET /_delegate` returns.
         self.pending: str | None = None
-        # Loopback capabilities in registration order, the order the gateway pays with them.
+        # Capabilities in registration order, the order the gateway pays with them.
         self.capabilities: list[Registered] = []
         # Pools, lowercase, whose pulls stop for funding: a capability from one is retired and the
         # next one pays.
@@ -285,7 +273,6 @@ class FakeGateway:
         self.owners: dict[int, str] = {}
         # The highest stored `seq` per namespace and signer.
         self._high_water: dict[str, int] = {}
-        self.allowance: int = allowance_bytes if allowance_bytes is not None else 2**53 - 1
 
     @property
     def url(self) -> str:
@@ -401,12 +388,14 @@ class FakeGateway:
         return self._bare(req, path, search)
 
     def _preflight(self, path: str, bare: bool) -> httpx.Response:
-        api = path in ("/_delegate", "/_capability", "/_pointer")
-        if api and not bare:
+        if (path in API or path == "/_pointer") and not bare:
             return _text(404, "the gateway API answers on the gateway origin only\n")
-        if path in ("/_delegate", "/_capability"):
-            return _text(404, "a public gateway has no API\n")
-        methods, headers = ("PUT", "content-type") if path == "/_pointer" else ("GET, HEAD", "range")
+        if path == "/_pointer":
+            methods, headers = "PUT", "content-type"
+        elif path in API:
+            methods, headers = "GET, PUT", "content-type"
+        else:
+            methods, headers = "GET, HEAD", "range"
         return _text(
             204,
             "",
@@ -421,12 +410,14 @@ class FakeGateway:
         token: str | None = req.headers.get("x-decdn-token")
         return token == self.token
 
-    def _pay(self) -> httpx.Response | None:
-        """Pay a loopback pull: `None` when a held capability pays, else the 402.
+    def _pay(self, uri: DecdnUri) -> httpx.Response | None:
+        """Pay the pull of `uri`: `None` when the cache holds it or a held capability pays.
 
         The first capability not spent and outside the expiry margin pays. A funding stop on its
-        pool retires it, and the next one takes the request.
+        pool retires it, and the next one takes the request. When none can, the refusal.
         """
+        if uri.kind == "blob" and uri.hash in self.cached:
+            return None
         deadline = int(time.time()) + EXPIRY_MARGIN_SECS
         for held in self.capabilities:
             if held.spent or held.expiry <= deadline:
@@ -435,17 +426,25 @@ class FakeGateway:
                 held.spent = True
                 continue
             return None
-        return _text(402, f"{NO_CAPABILITY}\n")
+        return self._cannot_pay(uri)
+
+    def _cannot_pay(self, uri: DecdnUri) -> httpx.Response:
+        """The answer when nothing can pay for `uri`: 402 text (loopback) or 503 JSON (public)."""
+        if self.mode == "loopback":
+            return _text(402, f"{NO_CAPABILITY}\n")
+        canonical = format_uri(uri)
+        return _json(
+            503,
+            {"error": CANNOT_PAY, "retry_after_secs": 60, "uri": canonical},
+            {"retry-after": "60", "link": f'<{canonical}>; rel="alternate"'},
+        )
 
     def _bare(self, req: httpx.Request, path: str, search: str) -> httpx.Response:
         api = self._api(req, path)
         if api is not None:
             return api
-        if self.mode == "public":
-            if path in ("/_delegate", "/_capability"):
-                return _text(404, "a public gateway has no API\n")
-            if req.method == "HEAD" and path in ("/", "/favicon.ico"):
-                return _text(200, "")
+        if self.mode == "public" and req.method == "HEAD" and path in ("/", "/favicon.ico"):
+            return _text(200, "")
         if req.method == "GET" and path == "/":
             return _response(200, b"<h1>decdn gateway</h1>", {"content-type": "text/html; charset=utf-8"})
         if req.method == "HEAD" and self.mode == "loopback":
@@ -469,11 +468,10 @@ class FakeGateway:
     def _api(self, req: httpx.Request, path: str) -> httpx.Response | None:
         """The gateway API on the bare host, or `None` for a content path."""
         method = req.method
-        if self.mode == "public":
-            if path == "/_pointer" and method == "PUT":
-                return self._put_pointer(req)
-            return None
-        # The API takes no token and no `Origin`, and answers nothing cross-origin.
+        if self.mode == "public" and path == "/_pointer" and method == "PUT":
+            return self._put_pointer(req)
+        # The API takes no token and no `Origin`. A loopback gateway answers nothing
+        # cross-origin; a public one answers its preflights in `_preflight`.
         if method == "OPTIONS":
             return _text(403, "no cross-origin access\n")
         if path == "/_delegate" and method == "GET":
@@ -485,24 +483,27 @@ class FakeGateway:
         if path == "/_capability" and method == "PUT":
             return self._register(req)
         if path == "/_capability" and method == "GET":
-            now = int(time.time())
-            return _json(
-                200,
-                [
-                    {
-                        "cap": r.cap,
-                        "expiry": r.expiry,
-                        "pool": r.pool,
-                        "signer": checksum(r.signer),
-                        "spent": r.spent,
-                    }
-                    for r in self.capabilities
-                    if r.expiry > now
-                ],
-            )
+            return _json(200, self._held())
+        if path == "/_status" and method == "GET":
+            return _json(200, {"capabilities": self._held()})
         if path == "/_pointer" and method == "PUT":
             return _text(404, "a loopback gateway holds no namespace pointers\n")
         return None
+
+    def _held(self) -> list[dict[str, Any]]:
+        """The capabilities `GET /_capability` lists: unexpired, in registration order."""
+        now = int(time.time())
+        return [
+            {
+                "cap": r.cap,
+                "expiry": r.expiry,
+                "pool": r.pool,
+                "signer": checksum(r.signer),
+                "spent": r.spent,
+            }
+            for r in self.capabilities
+            if r.expiry > now
+        ]
 
     def _register(self, req: httpx.Request) -> httpx.Response:
         """`PUT /_capability`: a key the gateway holds takes the capability, one per pool."""
@@ -593,7 +594,7 @@ class FakeGateway:
         return f"http://{host}{path}"
 
     def _site(self, req: httpx.Request, path: str, search: str, site: _SiteRef) -> httpx.Response:
-        if path in ("/_delegate", "/_capability", "/_pointer"):
+        if path in API or path == "/_pointer":
             return _text(404, "the gateway API answers on the gateway origin only\n")
         if req.method == "HEAD" and self.mode == "loopback":
             return _text(405, "", {"allow": "GET"})
@@ -658,20 +659,6 @@ class FakeGateway:
             headers["accept-ranges"] = "bytes"
         return _response(200, None, headers)
 
-    def _refusal(
-        self, status: Literal[402, 503], uri: DecdnUri, retry_after: int, why: str
-    ) -> httpx.Response:
-        canonical = format_uri(uri)
-        return _json(
-            status,
-            {"error": why, "uri": canonical, "retry_after_secs": retry_after},
-            {"retry-after": str(retry_after), "link": f'<{canonical}>; rel="alternate"'},
-        )
-
-    def _seconds_to_midnight(self) -> int:
-        now = time.time()
-        return math.ceil(86400 - (now % 86400))
-
     def _head_blob(self, uri: DecdnUri) -> httpx.Response:
         """`HEAD` of a raw blob on a public gateway.
 
@@ -686,48 +673,33 @@ class FakeGateway:
         data = self.blobs.get(uri.hash)
         # The empty root is empty, with no proof.
         if uri.hash not in self._proven and (data is None or len(data) != 0):
-            if self.allowance <= 0:
-                return self._refusal(
-                    402, uri, self._seconds_to_midnight(), "the gateway's allowance is spent for today"
-                )
+            refused = self._pay(uri)
+            if refused is not None:
+                return refused
             if uri.hash in self.unfunded:
-                return self._refusal(503, uri, 60, "the gateway cannot pay right now")
+                return self._cannot_pay(uri)
             if data is None:
                 return _text(404, "not found\n")
-            self._prove(uri.hash, len(data))
+            self._proven.add(uri.hash)
         if data is not None:
             headers["content-length"] = str(len(data))
             headers["accept-ranges"] = "bytes"
         return _response(200, None, headers)
 
-    def _prove(self, hash_: str, size: int) -> None:
-        """Pay for the size proof of the raw blob `hash_` of `size` bytes, once; the empty root needs none."""
-        if hash_ in self._proven:
-            return
-        if size > 0:
-            self._charge(PROOF_BYTES)
-        self._proven.add(hash_)
-
     def _serve(self, uri: DecdnUri, present: Literal["bare", "site"], range_: str | None) -> httpx.Response:
-        if self.mode == "public" and self.allowance <= 0:
-            return self._refusal(
-                402, uri, self._seconds_to_midnight(), "the gateway's allowance is spent for today"
-            )
-        if self.mode == "loopback" and not (uri.kind == "blob" and uri.hash in self.cached):
-            refused = self._pay()
-            if refused is not None:
-                return refused
+        refused = self._pay(uri)
+        if refused is not None:
+            return refused
         if uri.hash in self.unfunded:
-            return self._refusal(503, uri, 60, "the gateway cannot pay right now")
+            return self._cannot_pay(uri)
         if uri.kind == "blob":
-            # The gateway proves a raw blob's size before it answers (one chunk group of the
-            # allowance, once), so a raw blob answers as a sized entry does.
+            # The gateway proves a raw blob's size before it answers, so a raw blob answers as a
+            # sized entry does.
             data = self.blobs.get(uri.hash)
             if data is None:
                 return _text(404, "not found\n")
-            self._prove(uri.hash, len(data))
+            self._proven.add(uri.hash)
             return self._sized(
-                uri,
                 uri.hash,
                 data,
                 len(data),
@@ -741,7 +713,6 @@ class FakeGateway:
         manifest = self._manifest_of(uri.hash)
         if isinstance(manifest, httpx.Response):
             return manifest
-        self._charge(len(self.blobs.get(uri.hash, b"")))
         if uri.kind == "bundle":
             if present == "site" and manifest.entry("index.html") is not None:
                 return self._entry(
@@ -763,7 +734,7 @@ class FakeGateway:
         if entry is None:
             return _text(404, f"no entry {path} in bundle\n")
         if entry.hash in self.unfunded:
-            return self._refusal(503, uri, 60, "the gateway cannot pay right now")
+            return self._cannot_pay(uri)
         data = self.blobs.get(entry.hash)
         if data is None:
             return _text(502, "the upstream pull failed\n")
@@ -779,11 +750,10 @@ class FakeGateway:
             return self._body(entry.hash, out.encode(), 200, headers)
         if entry.size is None:
             return self._body(entry.hash, data, 200, headers)
-        return self._sized(uri, entry.hash, data, entry.size, range_, headers)
+        return self._sized(entry.hash, data, entry.size, range_, headers)
 
     def _sized(
         self,
-        uri: DecdnUri,
         hash_: str,
         data: bytes,
         size: int,
@@ -792,22 +762,12 @@ class FakeGateway:
     ) -> httpx.Response:
         """The answer for `data` of known `size`.
 
-        One `range_` answers 206, or 416 past the end; else the whole answers with its length. On a
-        public gateway it is refused with 402 when what it pays for (the whole, or the window widened
-        to chunk groups) does not fit what is left of the allowance, and it is charged that.
+        One `range_` answers 206, or 416 past the end; else the whole answers with its length.
         """
         headers["accept-ranges"] = "bytes"
         w = None if hash_ in self.whole else _window(range_, size)
         if w == "unsatisfiable":
             return _text(416, "range not satisfiable\n", {"content-range": f"bytes */{size}"})
-        billable = size if w is None else _group_span(w, size)
-        if self.mode == "public" and billable > self.allowance:
-            return self._refusal(
-                402, uri, 0, "the response does not fit what is left of the gateway's allowance today"
-            )
-        # The pull pays for the aligned span; the body charges the window.
-        if w is not None:
-            self._charge(billable - w[1])
         if w is None:
             headers["content-length"] = str(size)
             return self._body(hash_, data, 200, headers)
@@ -816,13 +776,8 @@ class FakeGateway:
         headers["content-range"] = f"bytes {offset}-{offset + length - 1}/{size}"
         return self._body(hash_, data[offset : offset + length], 206, headers)
 
-    def _charge(self, n: int) -> None:
-        if self.mode == "public":
-            self.allowance -= n
-
     def _body(self, hash_: str, data: bytes, status: int, headers: dict[str, str]) -> httpx.Response:
         """A streamed body of `data`, in two chunks, honouring the fault sets for `hash_`."""
-        self._charge(len(data))
         if hash_ in self.partial and status == 200 and len(data) > 1:
             return _response(206, data[:1], {**headers, "content-range": f"bytes 0-0/{len(data)}"})
         out = data

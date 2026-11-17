@@ -16,8 +16,10 @@ def test_status_maps_to_code(status: int, code: ErrorCode) -> None:
     assert err.body == "nope"
 
 
-def test_codes_has_twelve_entries() -> None:
-    assert len(CODES) == 12
+def test_codes_has_eleven_entries() -> None:
+    assert len(CODES) == 11
+    # A gateway asks for no credentials, so a 401 is a status the contract does not name.
+    assert error_of(401, httpx.Headers(), "nope").code == "HTTP"
 
 
 def test_unlisted_status_is_http() -> None:

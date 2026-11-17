@@ -23,7 +23,7 @@ from decdn.pointer import PointerDomain
 from decdn.uri import SCHEME, DecdnUri, UriKind, format_uri, parse_uri
 
 Context = Literal["public", "loopback"]
-"""Where the client reaches the gateway: a public gateway, or the local one with its token."""
+"""Where the client reaches the gateway: a public gateway, or the local one on a loopback address."""
 
 VerifyMode = Literal["auto"] | bool
 """`"auto"` verifies what can be verified; `True` refuses what cannot; `False` verifies nothing."""
@@ -133,7 +133,6 @@ class Core:
         self,
         gateway_url: str,
         *,
-        token: str | None,
         pointer: PointerDomain | None,
         verify: VerifyMode,
         manifest_cache_size: int,
@@ -146,14 +145,13 @@ class Core:
         if gateway.scheme == "" or gateway.raw_host == b"" or (port is not None and not 0 <= port <= 65535):
             raise config(f"not a gateway URL: {gateway_url}")
         hostname = gateway.raw_host.decode("ascii")
-        self.context: Context = "loopback" if token is not None or hostname in _LOOPBACK_HOSTS else "public"
+        self.context: Context = "loopback" if hostname in _LOOPBACK_HOSTS else "public"
         self.scheme = gateway.scheme
         self.port = port
         bracketed = f"[{hostname}]" if ":" in hostname else hostname
         # `host[:port]` of the gateway, the port only when it is not the scheme's default.
         self.authority = bracketed if port is None else f"{bracketed}:{port}"
         self.origin = f"{self.scheme}://{self.authority}"
-        self.token = token
         self.pointer = pointer
         self.verify: VerifyMode = verify
         self.cache_size = manifest_cache_size
@@ -172,16 +170,6 @@ class Core:
         self.manifests.move_to_end(hash)
         while len(self.manifests) > self.cache_size:
             self.manifests.popitem(last=False)
-
-    def auth_headers(self) -> dict[str, str]:
-        """Return the headers every bare-host request carries."""
-        if self.token is None:
-            return {}
-        return {"x-decdn-token": self.token}
-
-    def is_bare(self, url: str) -> bool:
-        """Return whether `url` is on the gateway's bare host."""
-        return url.startswith(f"{self.origin}/")
 
     def bare_url(self, uri: DecdnUri) -> str:
         """Return the URI on the bare host."""

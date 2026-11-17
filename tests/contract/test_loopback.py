@@ -1,4 +1,4 @@
-"""The SDK against a loopback gateway with its token: the fake by default, the real binary when
+"""The SDK against a loopback gateway: the fake by default, the real binary when
 decdn's contract run runs this file with `DECDN_CONTRACT`:
 https://github.com/decdn/decdn/blob/main/crates/e2e/src/sdk_contract.rs
 
@@ -10,13 +10,15 @@ own pool, and each flavour registers its own.
 import re
 from collections.abc import Iterator
 
+import httpx
 import pytest
 
+from decdn.base32 import hash_to_base32
 from decdn.capability import parse_capability
 from decdn.client import ByteRange
 from decdn.hashing import blake3_hex
 from tests.contract.fixture import Contract, contract, shipped_after
-from tests.fake_gateway import NO_CAPABILITY
+from tests.fake_gateway import CROSS_ORIGIN, CROSS_SITE, NO_CAPABILITY, NO_FETCH_SITE
 from tests.support.flavour import FLAVOURS, Driver, rejects
 
 pytestmark = pytest.mark.anyio
@@ -34,15 +36,15 @@ async def client(contract: Contract, flavour: Driver) -> Driver:
     return await contract.open(flavour)
 
 
-async def test_refuses_a_wrong_token(contract: Contract, flavour: Driver) -> None:
-    c = contract
-    wrong = await c.open(flavour, token="00" * 32)
-    await rejects(wrong.get(f"decdn:{c.blob}"), "UNAUTHORIZED")
+async def test_refuses_an_unknown_host(contract: Contract, flavour: Driver) -> None:
+    r = await contract.fetch(flavour, "http://evil.example/")
+    assert r.status_code == 403
 
 
-# The pending delegate key, capabilities without a scope, and payment by the held capabilities in
-# registration order: decdn/decdn's gateway after release 0.3.1. A released gateway up to 0.3.1
-# keeps a key per call and pays per page host, so it never collects these tests.
+# No token, a browser-header gate on content, the pending delegate key, capabilities without a
+# scope, and payment by the held capabilities in registration order: decdn/decdn's gateway after
+# release 0.3.1. A released gateway up to 0.3.1 wants a token and a page host, so it never collects
+# these tests.
 if shipped_after("0.3.1"):
 
     async def test_refuses_content_no_capability_pays_for_as_plain_text(
@@ -54,16 +56,13 @@ if shipped_after("0.3.1"):
         assert e.fallback_uri is None
 
     async def test_returns_the_one_pending_key_until_a_capability_claims_it(
-        contract: Contract, flavour: Driver
+        contract: Contract, client: Driver
     ) -> None:
-        c = contract
-        # The API takes no token.
-        anonymous = await flavour.open(gateway_url=c.gateway_url, transport=c.transport(flavour))
-        first = await anonymous.loopback_delegate()
-        again = await anonymous.loopback_delegate()
+        first = await client.loopback_delegate()
+        again = await client.loopback_delegate()
         assert re.fullmatch(r"0x[0-9a-fA-F]{40}", first.address)
         assert again.address == first.address
-        assert first.address.lower() == parse_capability(c.capability(flavour)).signer.lower()
+        assert first.address.lower() == parse_capability(contract.capability(client)).signer.lower()
 
     async def test_registers_a_capability_from_each_pool_on_the_one_key(
         contract: Contract, flavour: Driver, client: Driver
@@ -75,12 +74,11 @@ if shipped_after("0.3.1"):
         assert registered.pool.lower() == grant.pool_id.lower()
         assert registered.expiry == grant.expiry
 
-    async def test_lists_the_capabilities_in_registration_order_without_the_token(
-        contract: Contract, flavour: Driver
+    async def test_lists_the_capabilities_in_registration_order(
+        contract: Contract, flavour: Driver, client: Driver
     ) -> None:
         c = contract
-        anonymous = await flavour.open(gateway_url=c.gateway_url, transport=c.transport(flavour))
-        held = await anonymous.loopback_capabilities()
+        held = await client.loopback_capabilities()
         grants = [parse_capability(cap) for cap in c.capabilities[: len(FLAVOURS)]]
         wanted = [(g.signer.lower(), g.pool_id.lower()) for g in grants]
         # Every flavour registered its own, in flavour order, before any flavour lists them.
@@ -117,10 +115,52 @@ if shipped_after("0.3.1"):
             method="OPTIONS",
             headers={"origin": "https://app.example", "access-control-request-method": "PUT"},
         )
-        assert (r.status_code, r.text) == (403, "no cross-origin access\n")
+        assert r.status_code == 403
         assert r.headers.get("access-control-allow-origin") is None
 
-    async def test_streams_a_blob_with_the_token_verified(contract: Contract, client: Driver) -> None:
+    async def test_refuses_a_page_on_another_site_or_origin_and_a_browser_with_no_fetch_site(
+        contract: Contract, flavour: Driver
+    ) -> None:
+        c = contract
+        # The gate stands in front of every route: content and the API alike.
+        for url in (f"{c.gateway_url}/{c.blob}", f"{c.gateway_url}/_capability"):
+            cross_site = await c.fetch(flavour, url, headers={"sec-fetch-site": "cross-site"})
+            assert (cross_site.status_code, cross_site.text) == (403, f"{CROSS_SITE}\n"), url
+            foreign = await c.fetch(
+                flavour, url, headers={"origin": "https://app.example", "sec-fetch-site": "same-site"}
+            )
+            assert (foreign.status_code, foreign.text) == (403, f"{CROSS_ORIGIN}\n"), url
+            browser = await c.fetch(flavour, url, headers={"user-agent": "Mozilla/5.0"})
+            assert (browser.status_code, browser.text) == (403, f"{NO_FETCH_SITE}\n"), url
+
+    async def test_serves_a_page_on_one_of_its_own_sites(
+        contract: Contract, flavour: Driver, client: Driver
+    ) -> None:
+        c = contract
+        site = httpx.URL(await client.site_url(f"decdn:{c.bundle}/"))
+        own = {"origin": f"http://{site.netloc.decode('ascii')}", "sec-fetch-site": "same-site"}
+        r = await c.fetch(flavour, f"{c.gateway_url}/{c.blob}", headers=own)
+        assert r.status_code == 200
+        assert r.content == c.blob_bytes
+
+    async def test_serves_content_to_a_client_outside_a_browser(contract: Contract, flavour: Driver) -> None:
+        c = contract
+        r = await c.fetch(flavour, f"{c.gateway_url}/{c.blob}")
+        assert r.status_code == 200
+        assert r.content == c.blob_bytes
+
+    async def test_redirects_a_navigation_to_a_bundle_to_its_site(
+        contract: Contract, flavour: Driver
+    ) -> None:
+        c = contract
+        navigate = {"sec-fetch-mode": "navigate", "sec-fetch-site": "none"}
+        r = await c.fetch(flavour, f"{c.gateway_url}/{c.bundle}/a.txt", headers=navigate)
+        assert r.status_code == 302
+        location = r.headers.get("location") or ""
+        assert location.startswith(f"http://{hash_to_base32(c.bundle)}.localhost:")
+        assert location.endswith("/a.txt")
+
+    async def test_streams_a_blob_verified(contract: Contract, client: Driver) -> None:
         c = contract
         r = await client.get(f"decdn:{c.blob}")
         assert r.verified is True

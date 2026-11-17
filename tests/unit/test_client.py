@@ -20,8 +20,6 @@ from tests.support.flavour import Driver, rejects
 
 pytestmark = pytest.mark.anyio
 
-TOKEN = "cd" * 32
-
 
 def public_fake() -> tuple[FakeGateway, BundleManifest, str]:
     """A public fake holding one capability, so its pulls are paid."""
@@ -108,14 +106,14 @@ def on_sleep(
 # DecdnClient.open
 
 
-async def test_picks_the_context_from_the_gateway_url_and_token(flavour: Driver) -> None:
+async def test_picks_the_context_from_the_gateway_url(flavour: Driver) -> None:
     fake, _, _ = public_fake()
     assert (await flavour.open(fake)).context == "public"
     loop = FakeGateway("loopback")
-    c = await flavour.open(gateway_url="http://127.0.0.1:8484", transport=loop.transport())
-    assert c.context == "loopback"
-    c = await flavour.open(gateway_url="https://gw.example", token=TOKEN)
-    assert c.context == "loopback"
+    for url in ("http://127.0.0.1:8484", "http://localhost:8484", "http://[::1]:8484"):
+        c = await flavour.open(gateway_url=url, transport=loop.transport())
+        assert c.context == "loopback", url
+    assert (await flavour.open(gateway_url="https://gw.example")).context == "public"
 
 
 async def test_refuses_a_url_that_names_no_gateway(flavour: Driver) -> None:
@@ -602,25 +600,26 @@ async def test_rejects_a_bad_uri_before_any_request(flavour: Driver) -> None:
 
 
 def loopback_fake() -> tuple[FakeGateway, BundleManifest, str]:
-    fake = FakeGateway("loopback", token=TOKEN)
+    fake = FakeGateway("loopback")
     bundle = fake.add_bundle({"a.txt": "abc", "index.html": "<p>x</p>"})
     blob = fake.add_blob("loop bytes")
     fake.grant()
     return fake, bundle, blob
 
 
-async def open_loop(flavour: Driver, fake: FakeGateway, token: str = TOKEN, **kw: Any) -> Driver:
-    return await flavour.open(fake, token=token, **kw)
+async def open_loop(flavour: Driver, fake: FakeGateway, **kw: Any) -> Driver:
+    return await flavour.open(fake, **kw)
 
 
-async def test_sends_the_token_alone_and_verifies_a_blob(flavour: Driver) -> None:
+async def test_sends_no_credentials_and_verifies_a_blob(flavour: Driver) -> None:
     fake, _, blob = loopback_fake()
     c = await open_loop(flavour, fake)
     r = await c.get(f"decdn:{blob}")
     assert r.verified is True
     assert await c.text(r) == "loop bytes"
-    assert fake.seen[0].headers.get("x-decdn-token") == TOKEN
-    assert fake.seen[0].headers.get("x-decdn-host") is None
+    for name in ("x-decdn-token", "x-decdn-host", "origin", "sec-fetch-site"):
+        assert fake.seen[0].headers.get(name) is None, name
+    assert not (fake.seen[0].headers.get("user-agent") or "").startswith("Mozilla/")
 
 
 async def test_fetches_an_entry_on_the_bare_host_byte_exact_and_verifies_it(flavour: Driver) -> None:
@@ -635,11 +634,8 @@ async def test_fetches_an_entry_on_the_bare_host_byte_exact_and_verifies_it(flav
     ]
 
 
-async def test_maps_a_wrong_token_to_unauthorized_and_no_usable_capability_to_payment_required(
-    flavour: Driver,
-) -> None:
+async def test_maps_no_usable_capability_to_payment_required(flavour: Driver) -> None:
     fake, _, blob = loopback_fake()
-    await rejects((await open_loop(flavour, fake, "00" * 32)).get(f"decdn:{blob}"), "UNAUTHORIZED")
     fake.unfunded_pools.add(fake.capabilities[0].pool)
     e = await rejects((await open_loop(flavour, fake)).get(f"decdn:{blob}"), "PAYMENT_REQUIRED")
     assert e.body == NO_CAPABILITY

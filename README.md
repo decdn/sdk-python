@@ -83,7 +83,7 @@ The client talks to one of two kinds of gateway:
 | Gateway                                                  | Where it runs                          | Who pays                                          |
 | -------------------------------------------------------- | -------------------------------------- | ------------------------------------------------- |
 | Public (`decdn gateway --public-url https://decdn.link`) | Anywhere with network access           | The capabilities registered with the gateway      |
-| Loopback (`decdn gateway`, `http://127.0.0.1:8484`)      | The same machine, with the gateway token | The capabilities registered with the gateway      |
+| Loopback (`decdn gateway`, `http://127.0.0.1:8484`)      | The same machine, outside a browser      | The capabilities registered with the gateway      |
 
 The gateway's HTTP contract is
 [appendix-gateway](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md);
@@ -155,15 +155,14 @@ assign the pending key, then register the capability:
 
 ```python
 from decdn import AsyncClient, Client
-from decdn.local import read_loopback_token
 
-with Client("http://127.0.0.1:8484", token=read_loopback_token()) as client:  # ~/.decdn/gateway/token
+with Client("http://127.0.0.1:8484") as client:
     delegate = client.loopback.delegate()
     # The pool owner: decdn pool assign --pool <id> --signer <delegate.address> ...
     client.loopback.register_capability("dcap1:...")
     r = client.get("decdn:<64 hex>")
 
-async with AsyncClient("http://127.0.0.1:8484", token=read_loopback_token()) as client:
+async with AsyncClient("http://127.0.0.1:8484") as client:
     delegate = await client.loopback.delegate()
     await client.loopback.register_capability("dcap1:...")
     r = await client.get("decdn:<64 hex>")
@@ -175,14 +174,17 @@ pays with them: a request goes to the first one that is not spent and not
 near its expiry. When none can pay, a request the gateway must pull fails with
 `PAYMENT_REQUIRED`; a blob its cache holds whole still comes, at no cost. The
 gateway keeps keys and capabilities in memory, so after a restart you register
-again. The delegate and capability API takes no token; content requests do. A
-`dcap1:` token decodes offline with `parse_capability`.
+again. A `dcap1:` token decodes offline with `parse_capability`.
+
+A loopback gateway takes no credentials. It answers what runs outside a
+browser on the same machine and refuses a web page from another site or origin
+with `FORBIDDEN`; the SDK sends no `Origin`, no `Sec-Fetch-*` headers and no
+browser user agent, so it is served.
 
 The SDK does not start the gateway. Run it yourself (`decdn gateway`, or the
 `decdn/decdn` Docker image). A `localhost`, `127.0.0.1` or `::1` URL opens a
 loopback client; a public gateway you run locally needs another host name,
-such as `decdn.localhost`. `read_loopback_token(data_dir=None)` reads the
-token from the gateway's data dir (`default_data_dir()`, `~/.decdn/gateway`).
+such as `decdn.localhost`.
 
 ## Verification
 
@@ -217,7 +219,6 @@ Every failure is a `DecdnError` with a stable `code`:
 | `POOL_UNFUNDED`         | 503: no capability the public gateway holds can pay                                                 |
 | `NOT_FOUND`             | 404                                                                                                 |
 | `RANGE_NOT_SATISFIABLE` | 416: the range starts past the end; `size` holds the entry's size                                   |
-| `UNAUTHORIZED`          | 401: the loopback token is missing or wrong                                                         |
 | `FORBIDDEN`             | 403                                                                                                 |
 | `BAD_URI`               | A `decdn:` URI that does not parse, or 400                                                          |
 | `RATE_LIMITED`          | 429                                                                                                 |
@@ -290,7 +291,7 @@ are the deployment the gateway verifies against.
 
 | Export                                                                                  | What it does                                                                                                                                                                  |
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Client(gateway_url, ...)`, `AsyncClient(gateway_url, ...)`                             | A client on a public or loopback gateway (`token`, `pointer`, `transport`, `verify`, `manifest_cache_size`, `timeout`); a context manager                              |
+| `Client(gateway_url, ...)`, `AsyncClient(gateway_url, ...)`                             | A client on a public or loopback gateway (`pointer`, `transport`, `verify`, `manifest_cache_size`, `timeout`); a context manager                              |
 | `client.get(uri, range=, verify=, retry=)`                                              | Fetches a blob, a bundle, a bundle entry or a range as a `Response` / `AsyncResponse` (`verified`, `iter_bytes`, `read`, `text`, `json`)                                      |
 | `client.head(uri)`                                                                      | The size, hash and content type of what a URI names, without its bytes                                                                                                        |
 | `client.resolve(uri)`                                                                   | A URI's kind, hash, bare and site URLs, and its manifest entry (reads the manifest for a bundle or entry)                                                                     |
@@ -305,7 +306,6 @@ are the deployment the gateway verifies against.
 | `blake3_hex`, `create_blake3`                                                           | BLAKE3, one-shot and incremental                                                                                                                                              |
 | `parse_manifest`, `parse_capability`                                                    | Decodes a v1 bundle manifest, checking its hash when given one; decodes a `dcap1:` token without checking its signature                                                       |
 | `DecdnError`                                                                            | Every failure, with a stable `code` ([Errors](#errors))                                                                                                                       |
-| `read_loopback_token`, `default_data_dir`                                               | From `decdn.local`: the loopback gateway's token and data dir (`~/.decdn/gateway`)                                                                                            |
 
 Namespaces, sequence numbers, caps and expiries are `int`.
 

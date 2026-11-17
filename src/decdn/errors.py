@@ -11,8 +11,6 @@ ErrorCode = Literal[
     "NOT_FOUND",
     # 416: the range starts past the end; `size` holds the entry's size.
     "RANGE_NOT_SATISFIABLE",
-    # 401: the loopback token is missing or wrong.
-    "UNAUTHORIZED",
     # 403.
     "FORBIDDEN",
     # 400, or a `decdn:` URI that does not parse.

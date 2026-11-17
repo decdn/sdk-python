@@ -11,9 +11,12 @@ from decdn.pointer import PointerDomain
 from tests.conftest import fixture_json
 from tests.fake_gateway import (
     CANNOT_PAY,
+    CROSS_ORIGIN,
+    CROSS_SITE,
     EXPIRY_MARGIN_SECS,
     EXPOSED,
     NO_CAPABILITY,
+    NO_FETCH_SITE,
     FakeGateway,
     checksum,
 )
@@ -21,7 +24,6 @@ from tests.support.host_transport import AsyncHostTransport, HostTransport
 from tests.support.postcard import encode_capability
 
 CSP = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'"
-TOKEN = "ab" * 32
 
 
 def client(fake: FakeGateway, *, follow: bool = False) -> httpx.Client:
@@ -107,7 +109,7 @@ def test_site_serves_entry_with_type() -> None:
     m = loopback.add_bundle({"page.html": "<p>x</p>"})
     loopback.grant()
     with client(loopback) as c:
-        bare = c.get(f"{loopback.url}/{m.hash}/page.html", headers={"x-decdn-token": TOKEN})
+        bare = c.get(f"{loopback.url}/{m.hash}/page.html")
         assert (bare.status_code, bare.text) == (200, "<p>x</p>")
         assert bare.headers["content-type"] == "text/plain; charset=utf-8"
         assert "content-security-policy" not in bare.headers
@@ -189,32 +191,53 @@ def test_unknown_host_403() -> None:
         assert c.get(f"{fake.url}/nothex").status_code == 400
 
 
-def test_loopback_needs_token_401() -> None:
+def test_loopback_browser_header_gate() -> None:
     fake = FakeGateway("loopback")
     h = fake.add_blob("hello")
     m = fake.add_bundle({"a.txt": "x"})
     site = f"http://{hash_to_base32(m.hash)}.localhost:8484"
+    fake.grant()
     with client(fake) as c:
         assert fake.url == "http://127.0.0.1:8484"
+        # A client outside a browser is served, on the bare host and on a site.
         r = c.get(f"{fake.url}/{h}")
-        assert (r.status_code, r.text) == (401, "token required\n")
-        r = c.get(f"{site}/a.txt")
-        assert (r.status_code, r.text) == (401, "token required outside a browser\n")
-        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "cross-site"}).status_code == 403
-        # A site pays with the held capabilities, as a content request does.
-        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-origin"}).status_code == 402
-        fake.grant()
-        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-origin"}).text == "x"
-        assert c.get("http://localhost:8484/").text == "<h1>decdn gateway</h1>"
+        assert (r.status_code, r.content) == (200, b"hello")
         assert "access-control-allow-origin" not in r.headers
+        assert c.get(f"{site}/a.txt").text == "x"
+        for url in (f"{fake.url}/{h}", f"{site}/a.txt", f"{fake.url}/_delegate", f"{fake.url}/_capability"):
+            r = c.get(url, headers={"sec-fetch-site": "cross-site"})
+            assert (r.status_code, r.text) == (403, f"{CROSS_SITE}\n"), url
+            r = c.get(url, headers={"origin": "http://app.example", "sec-fetch-site": "same-site"})
+            assert (r.status_code, r.text) == (403, f"{CROSS_ORIGIN}\n"), url
+            for browser in ({"user-agent": "Mozilla/5.0"}, {"origin": site}):
+                r = c.get(url, headers=browser)
+                assert (r.status_code, r.text) == (403, f"{NO_FETCH_SITE}\n"), url
+        # The gateway's own origins pass: its bare host, its sites and their namespaced spellings.
+        for own in (fake.url, "http://localhost:8484", site, f"http://7.{site[len('http://') :]}"):
+            r = c.get(f"{fake.url}/{h}", headers={"origin": own, "sec-fetch-site": "same-site"})
+            assert r.status_code == 200, own
+        for other in ("http://localhost:9999", "https://127.0.0.1:8484", "null", f"http://x.{site[7:]}"):
+            r = c.get(f"{fake.url}/{h}", headers={"origin": other, "sec-fetch-site": "same-site"})
+            assert r.text == f"{CROSS_ORIGIN}\n", other
+        # A site spends only for its own pages, the user and a top-level navigation.
+        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-site"}).status_code == 403
+        same = {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate"}
+        assert c.get(f"{site}/a.txt", headers=same).text == "x"
+        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-origin"}).text == "x"
+        # A navigation to a bundle on the bare host goes to its site; anything else is served there.
+        r = c.get(
+            f"{fake.url}/{m.hash}/a.txt", headers={"sec-fetch-mode": "navigate", "sec-fetch-site": "none"}
+        )
+        assert (r.status_code, r.headers["location"]) == (302, f"{site}/a.txt")
+        assert c.get(f"{fake.url}/{m.hash}/a.txt").text == "x"
+        assert c.get("http://localhost:8484/").text == "<h1>decdn gateway</h1>"
 
 
 def test_loopback_pays_with_the_first_usable_capability_in_registration_order() -> None:
     fake = FakeGateway("loopback")
     h = fake.add_blob("hello")
-    auth = {"x-decdn-token": TOKEN}
     with client(fake) as c:
-        r = c.get(f"{fake.url}/{h}", headers=auth)
+        r = c.get(f"{fake.url}/{h}")
         assert (r.status_code, r.text) == (402, f"{NO_CAPABILITY}\n")
         assert r.headers["content-type"] == "text/plain; charset=utf-8"
         # Inside the expiry margin, spent, then one whose pool stops for funding: the fourth pays.
@@ -224,14 +247,14 @@ def test_loopback_pays_with_the_first_usable_capability_in_registration_order() 
         drained = fake.grant("0x" + "03" * 32)
         fake.unfunded_pools.add(drained.pool)
         paying = fake.grant("0x" + "04" * 32)
-        r = c.get(f"{fake.url}/{h}", headers=auth)
+        r = c.get(f"{fake.url}/{h}")
         assert (r.status_code, r.content) == (200, b"hello")
         assert [g.spent for g in (near, spent, drained, paying)] == [False, True, True, False]
         paying.spent = True
-        assert c.get(f"{fake.url}/{h}", headers=auth).status_code == 402
+        assert c.get(f"{fake.url}/{h}").status_code == 402
         # A blob the cache holds whole costs no pull, so it needs no capability.
         fake.cached.add(h)
-        r = c.get(f"{fake.url}/{h}", headers=auth)
+        r = c.get(f"{fake.url}/{h}")
         assert (r.status_code, r.content) == (200, b"hello")
 
 
@@ -286,7 +309,6 @@ def test_delegate_register_list_409s() -> None:
     cap = fixture_json("capability")
     signer = cap["signer"]
     fake = FakeGateway("loopback")
-    auth = {"x-decdn-token": TOKEN}
     body = json.dumps({"capability": cap["token"]})
     with client(fake) as c:
         # The API takes no token.
@@ -322,7 +344,7 @@ def test_delegate_register_list_409s() -> None:
         )
         # Expired capabilities drop out of the list.
         fake.capabilities[0].expiry = int(time.time())
-        assert len(c.get(f"{fake.url}/_capability", headers=auth).json()) == 1
+        assert len(c.get(f"{fake.url}/_capability").json()) == 1
         fresh = c.get(f"{fake.url}/_delegate").json()["address"]
         assert fresh.lower() not in (signer, address.lower())
 
@@ -356,9 +378,12 @@ def test_loopback_answers_no_preflight() -> None:
     page = {"origin": "http://app.example.com", "access-control-request-method": "PUT"}
     with client(fake) as c:
         for path in ("/_capability", "/_delegate", "/x"):
+            # A page's preflight stops at the gate; any other OPTIONS gets no CORS either.
             r = c.options(f"{fake.url}{path}", headers=page)
-            assert (r.status_code, r.text) == (403, "no cross-origin access\n")
+            assert (r.status_code, r.text) == (403, f"{CROSS_ORIGIN}\n")
             assert "access-control-allow-origin" not in r.headers
+            r = c.options(f"{fake.url}{path}")
+            assert (r.status_code, r.text) == (403, "no cross-origin access\n")
 
 
 def issue(
@@ -496,10 +521,10 @@ async def test_listen_serves_an_async_client() -> None:
     listener = fake.listen()
     try:
         async with httpx.AsyncClient(transport=AsyncHostTransport(listener.address)) as c:
-            r = await c.get(f"{fake.url}/{h}", headers={"x-decdn-token": fake.token})
+            r = await c.get(f"{fake.url}/{h}")
             assert r.status_code == 402
             fake.grant()
-            r = await c.get(f"{fake.url}/{h}", headers={"x-decdn-token": fake.token})
+            r = await c.get(f"{fake.url}/{h}")
             assert (r.status_code, r.content) == (200, b"hello")
             r = await c.put(f"{fake.url}/_capability", content=json.dumps({"capability": "nope"}))
             assert r.status_code == 422

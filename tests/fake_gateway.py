@@ -227,19 +227,17 @@ class FakeGateway:
         mode: FakeMode,
         *,
         host: str | None = None,
-        token: str | None = None,
     ) -> None:
         """Make a fake, holding no capability.
 
         `host` is `host[:port]` of the bare host, by default `decdn.test` (public) or
-        `127.0.0.1:8484` (loopback). `token` is the loopback token.
+        `127.0.0.1:8484` (loopback).
         """
         self.mode: FakeMode = mode
         # `host[:port]` of the bare host; settable so a listener can name the port it got.
         self.host: str = (
             host if host is not None else ("decdn.test" if mode == "public" else "127.0.0.1:8484")
         )
-        self.token: str = token if token is not None else "ab" * 32
         self.blobs: dict[str, bytes] = {}
         # The raw blobs whose size a proof here proved.
         self._proven: set[str] = set()
@@ -380,12 +378,49 @@ class FakeGateway:
                 site = _SiteRef(root, namespace=int(ns), pointer=int(ns))
         if site is None and not bare:
             return _text(403, "unknown Host\n")
+        if self.mode == "loopback":
+            refused = self._gate(req)
+            if refused is not None:
+                return refused
         path, search = _path_and_search(url)
         if self.mode == "public" and req.method == "OPTIONS":
             return self._preflight(path, site is None)
         if site is not None:
             return self._site(req, path, search, site)
         return self._bare(req, path, search)
+
+    def _own_origin(self, origin: str) -> bool:
+        """Whether `origin` is the loopback gateway's own: its bare host or one of its sites."""
+        if not origin.startswith("http://"):
+            return False
+        host = origin[len("http://") :]
+        port = self.host.split(":")[-1]
+        if host in (self.host, f"localhost:{port}"):
+            return True
+        suffix = f".localhost:{port}"
+        if not host.endswith(suffix):
+            return False
+        parts = host[: -len(suffix)].split(".")
+        ns_ok = len(parts) == 1 or (len(parts) == 2 and _NAMESPACE.fullmatch(parts[0]) is not None)
+        return ns_ok and base32_to_hash(parts[-1]) is not None
+
+    def _gate(self, req: httpx.Request) -> httpx.Response | None:
+        """The loopback browser-header gate every request passes: `None` to go on, else the 403.
+
+        A page on another site or origin, or a request that looks like a browser (an `Origin`, or a
+        `Mozilla/` user agent) but sends no `Sec-Fetch-Site`, is refused; a client outside a browser
+        goes on.
+        """
+        fetch_site = req.headers.get("sec-fetch-site")
+        if fetch_site == "cross-site":
+            return _text(403, f"{CROSS_SITE}\n")
+        origin = req.headers.get("origin")
+        if origin is not None and not self._own_origin(origin):
+            return _text(403, f"{CROSS_ORIGIN}\n")
+        browser = origin is not None or (req.headers.get("user-agent") or "").startswith("Mozilla/")
+        if fetch_site is None and browser:
+            return _text(403, f"{NO_FETCH_SITE}\n")
+        return None
 
     def _preflight(self, path: str, bare: bool) -> httpx.Response:
         if (path in API or path == "/_pointer") and not bare:
@@ -405,10 +440,6 @@ class FakeGateway:
                 "access-control-max-age": "600",
             },
         )
-
-    def _authorized(self, req: httpx.Request) -> bool:
-        token: str | None = req.headers.get("x-decdn-token")
-        return token == self.token
 
     def _pay(self, uri: DecdnUri) -> httpx.Response | None:
         """Pay the pull of `uri`: `None` when the cache holds it or a held capability pays.
@@ -455,14 +486,13 @@ class FakeGateway:
             uri = parse_uri(f"decdn:{path[1:]}{search}")
         except DecdnError as e:
             return _text(400, f"{e}\n")
-        if self.mode == "public" or not self._authorized(req):
-            if uri.kind != "blob":
-                return _response(302, None, {"location": self._site_location(uri)})
-            if self.mode == "loopback":
-                return _text(401, "token required\n")
-            if req.method == "HEAD":
-                return self._head_blob(uri)
-            return self._serve(uri, "bare", req.headers.get("range"))
+        # A public gateway serves a bundle on its site; a loopback one redirects a navigation there
+        # and serves anything else on the bare host.
+        navigate = req.headers.get("sec-fetch-mode") == "navigate"
+        if uri.kind != "blob" and (self.mode == "public" or navigate):
+            return _response(302, None, {"location": self._site_location(uri)})
+        if req.method == "HEAD":
+            return self._head_blob(uri)
         return self._serve(uri, "bare", req.headers.get("range"))
 
     def _api(self, req: httpx.Request, path: str) -> httpx.Response | None:
@@ -600,12 +630,16 @@ class FakeGateway:
             return _text(405, "", {"allow": "GET"})
         if req.method not in ("GET", "HEAD"):
             return _text(405, "method not allowed\n")
-        if self.mode == "loopback" and not self._authorized(req):
-            fetch_site = req.headers.get("sec-fetch-site")
-            if fetch_site is None:
-                return _text(401, "token required outside a browser\n")
-            if fetch_site not in ("same-origin", "none"):
-                return _text(403, "a site answers only its own pages and top-level navigation\n")
+        # A site spends only for its own pages, the user and a top-level navigation.
+        fetch_site = req.headers.get("sec-fetch-site")
+        navigate = req.headers.get("sec-fetch-mode") == "navigate"
+        if (
+            self.mode == "loopback"
+            and fetch_site is not None
+            and fetch_site not in ("same-origin", "none")
+            and not navigate
+        ):
+            return _text(403, "a site answers only its own pages and top-level navigation\n")
         if path.startswith("/_decdn/"):
             try:
                 uri = parse_uri(f"decdn:{path[len('/_decdn/') :]}{search}")
@@ -846,6 +880,14 @@ def _path_and_search(url: httpx.URL) -> tuple[str, str]:
     path = url.raw_path.split(b"?", 1)[0].decode("ascii")
     query = url.query.decode("ascii")
     return path, f"?{query}" if query else ""
+
+
+CROSS_SITE = "a page on another site may not use the gateway"
+"""The loopback 403's text, less its newline, for `Sec-Fetch-Site: cross-site`."""
+CROSS_ORIGIN = "a page on another origin may not use the gateway"
+"""The loopback 403's text, less its newline, for an `Origin` that is not the gateway's own."""
+NO_FETCH_SITE = "a browser that sends no Sec-Fetch-Site may not use the gateway"
+"""The loopback 403's text, less its newline, for a browser that sends no `Sec-Fetch-Site`."""
 
 
 def _body_text(req: httpx.Request) -> str:

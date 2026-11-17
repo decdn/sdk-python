@@ -53,7 +53,6 @@ class FixtureFile(TypedDict, total=False):
     gatewayUrl: str
     # `host:port` every request connects to.
     connect: str
-    token: str
     # One capability per client flavour, `sync` first (loopback), each from its own pool and every
     # one issued to the gateway's one pending key.
     capabilities: list[CapabilityFile]
@@ -93,7 +92,6 @@ class Contract:
     mode: Mode
     gateway_url: str
     connect: str
-    token: str | None
     capabilities: list[str]
     bundle: str
     files: dict[str, bytes]
@@ -119,8 +117,6 @@ class Contract:
     async def open(self, flavour: Driver, **extra: Any) -> Driver:
         """A client of the flavour on the gateway with the fixture's credentials; `extra` overrides them."""
         kw: dict[str, Any] = {"gateway_url": self.gateway_url, "transport": self.transport(flavour)}
-        if self.token is not None:
-            kw["token"] = self.token
         if self.pointer is not None:
             kw["pointer"] = self.pointer.domain
         kw.update(extra)
@@ -205,7 +201,6 @@ def fake(mode: Mode) -> tuple[FixtureFile, FakeGateway, Callable[[], None]]:
             int(c["expiry"]),
             bytes.fromhex(c["ownerSignature"].removeprefix("0x")),
         )
-        file["token"] = gw.token
         file["capabilities"] = [{"capability": c["token"]}, {"capability": second}]
         gw.pend(c["signer"])
     return file, gw, listener.close
@@ -267,7 +262,6 @@ def contract(mode: Mode) -> Contract:
         mode=mode,
         gateway_url=file["gatewayUrl"],
         connect=file["connect"],
-        token=file.get("token"),
         capabilities=[e["capability"] for e in file.get("capabilities", [])],
         bundle=file["bundle"],
         files={k: bytes.fromhex(v) for k, v in file["files"].items()},

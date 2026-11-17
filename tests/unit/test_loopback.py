@@ -12,7 +12,6 @@ from tests.support.postcard import encode_capability
 
 pytestmark = pytest.mark.anyio
 
-TOKEN = "cd" * 32
 capability = fixture_json("capability")
 OTHER_POOL = "0x" + "b3" * 32
 
@@ -28,15 +27,9 @@ def issued(pool: str, signer: str = capability["signer"], expiry: int = int(capa
     )
 
 
-async def open_loop(flavour: Driver, fake: FakeGateway, *, token: str | None = TOKEN) -> Driver:
-    if token is None:
-        return await flavour.open(fake)
-    return await flavour.open(fake, token=token)
-
-
 async def test_returns_the_pending_key_registers_capabilities_on_it_and_lists_them(flavour: Driver) -> None:
-    fake = FakeGateway("loopback", token=TOKEN)
-    c = await open_loop(flavour, fake)
+    fake = FakeGateway("loopback")
+    c = await flavour.open(fake)
     delegate = await c.loopback_delegate()
     assert isinstance(delegate, Delegate)
     assert len(delegate.address) == 42 and delegate.address.startswith("0x")
@@ -73,8 +66,8 @@ async def test_returns_the_pending_key_registers_capabilities_on_it_and_lists_th
 
 
 async def test_maps_the_apis_refusals(flavour: Driver) -> None:
-    fake = FakeGateway("loopback", token=TOKEN)
-    c = await open_loop(flavour, fake)
+    fake = FakeGateway("loopback")
+    c = await flavour.open(fake)
     # A key the gateway does not hold.
     await rejects(c.loopback_register(capability["token"]), "CONFLICT")
     fake.pend(capability["signer"])
@@ -84,13 +77,16 @@ async def test_maps_the_apis_refusals(flavour: Driver) -> None:
     await rejects(c.loopback_register("dcap1:AAAA"), "UNPROCESSABLE")
 
 
-async def test_needs_no_token(flavour: Driver) -> None:
-    fake = FakeGateway("loopback", token=TOKEN)
-    anonymous = await open_loop(flavour, fake, token=None)
-    delegate = await anonymous.loopback_delegate()
+async def test_passes_the_browser_header_gate_as_a_client_outside_a_browser(flavour: Driver) -> None:
+    fake = FakeGateway("loopback")
+    c = await flavour.open(fake)
+    delegate = await c.loopback_delegate()
     assert delegate.address.lower() == fake.pending
-    assert await anonymous.loopback_capabilities() == []
-    assert all(s.headers.get("x-decdn-token") is None for s in fake.seen)
+    assert await c.loopback_capabilities() == []
+    for seen in fake.seen:
+        assert seen.headers.get("origin") is None
+        assert seen.headers.get("sec-fetch-site") is None
+        assert not (seen.headers.get("user-agent") or "").startswith("Mozilla/")
 
 
 async def test_is_a_loopback_gateways_alone(flavour: Driver) -> None:

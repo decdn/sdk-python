@@ -12,7 +12,6 @@ from decdn.errors import DecdnError, ErrorCode
 
 CODES: dict[int, ErrorCode] = {
     400: "BAD_URI",
-    401: "UNAUTHORIZED",
     402: "PAYMENT_REQUIRED",
     403: "FORBIDDEN",
     404: "NOT_FOUND",

@@ -94,6 +94,7 @@ def test_recover_rejects_high_s_and_bad_v() -> None:
 
 def gateway() -> FakeGateway:
     fake = FakeGateway("public")
+    fake.grant()
     fake.pointer_domain = domain
     fake.owners[pointer.namespace] = fixture["address"].lower()
     return fake

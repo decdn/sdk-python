@@ -15,7 +15,6 @@ from typing import Any, Literal, TypedDict
 
 import httpx
 
-from decdn.capability import parse_capability
 from decdn.pointer import PointerDomain
 from tests.conftest import fixture_json
 from tests.fake_gateway import FakeGateway
@@ -25,14 +24,13 @@ from tests.support.postcard import encode_capability
 
 Mode = Literal["public", "loopback"]
 
-SECOND_SIGNER = "0x00000000000000000000000000000000000000a2"
-"""The delegate the fake's second capability names, for the `async` flavour."""
+SECOND_POOL = "0x" + "a2" * 32
+"""The pool the fake's second capability spends from, for the `async` flavour."""
 
 
 class CapabilityFile(TypedDict):
-    """A `dcap1:` issued to a delegate the gateway holds, not yet registered, and the host it is for."""
+    """A `dcap1:` issued to the gateway's pending key, not yet registered."""
 
-    host: str
     capability: str
 
 
@@ -55,10 +53,8 @@ class FixtureFile(TypedDict, total=False):
     gatewayUrl: str
     # `host:port` every request connects to.
     connect: str
-    token: str
-    host: str
-    capability: str
-    # One capability per client flavour, `sync` first (loopback).
+    # One capability per client flavour, `sync` first (loopback), each from its own pool and every
+    # one issued to the gateway's one pending key.
     capabilities: list[CapabilityFile]
     # The bundle's manifest hash, and its files.
     bundle: str
@@ -96,10 +92,7 @@ class Contract:
     mode: Mode
     gateway_url: str
     connect: str
-    token: str | None
-    host: str | None
-    capability: str | None
-    capabilities: list[tuple[str, str]]
+    capabilities: list[str]
     bundle: str
     files: dict[str, bytes]
     blob: str
@@ -107,8 +100,8 @@ class Contract:
     pointer: PointerFixture | None
     _close: Callable[[], None] | None = field(default=None, repr=False)
 
-    def entry(self, flavour: Driver) -> tuple[str, str]:
-        """The `(host, capability)` this flavour registers (loopback)."""
+    def capability(self, flavour: Driver) -> str:
+        """The capability this flavour registers (loopback)."""
         return self.capabilities[_index(flavour)]
 
     def namespace(self, flavour: Driver) -> int:
@@ -122,16 +115,8 @@ class Contract:
         return HostTransport(self.connect) if flavour.name == "sync" else AsyncHostTransport(self.connect)
 
     async def open(self, flavour: Driver, **extra: Any) -> Driver:
-        """A client of the flavour on the gateway with the fixture's credentials; `extra` overrides them.
-
-        On loopback the client's host is the flavour's capability host.
-        """
+        """A client of the flavour on the gateway with the fixture's credentials; `extra` overrides them."""
         kw: dict[str, Any] = {"gateway_url": self.gateway_url, "transport": self.transport(flavour)}
-        if self.token is not None:
-            kw["token"] = self.token
-        host = self.entry(flavour)[0] if self.capabilities else self.host
-        if host is not None:
-            kw["host"] = host
         if self.pointer is not None:
             kw["pointer"] = self.pointer.domain
         kw.update(extra)
@@ -144,15 +129,21 @@ class Contract:
         return httpx.AsyncClient(transport=AsyncHostTransport(self.connect), follow_redirects=False)
 
     async def fetch(
-        self, flavour: Driver, url: str, *, method: str = "GET", headers: dict[str, str] | None = None
+        self,
+        flavour: Driver,
+        url: str,
+        *,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
     ) -> httpx.Response:
         """Send one raw request through `http(flavour)` and return the answer, read."""
         http = self.http(flavour)
         if isinstance(http, httpx.Client):
             with http:
-                return http.request(method, url, headers=headers)
+                return http.request(method, url, headers=headers, content=content)
         async with http:
-            return await http.request(method, url, headers=headers)
+            return await http.request(method, url, headers=headers, content=content)
 
     def close(self) -> None:
         """Stop the fake's listener; a real gateway is the harness's to stop."""
@@ -194,6 +185,8 @@ def fake(mode: Mode) -> tuple[FixtureFile, FakeGateway, Callable[[], None]]:
         "blobBytes": blob_bytes.hex(),
     }
     if mode == "public":
+        # decdn's harness registers the public gateway's capability before the suite runs.
+        gw.grant()
         p = fixture_json("pointer")
         gw.pointer_domain = PointerDomain(chain_id=p["chainId"], publisher_registry=p["publisherRegistry"])
         gw.owners[7] = p["address"].lower()
@@ -208,21 +201,14 @@ def fake(mode: Mode) -> tuple[FixtureFile, FakeGateway, Callable[[], None]]:
     else:
         c = fixture_json("capability")
         second = encode_capability(
-            c["poolId"],
-            SECOND_SIGNER,
+            SECOND_POOL,
+            c["signer"],
             int(c["spendingCap"]),
             int(c["expiry"]),
             bytes.fromhex(c["ownerSignature"].removeprefix("0x")),
         )
-        file["token"] = gw.token
-        file["host"] = "example.com"
-        file["capability"] = c["token"]
-        file["capabilities"] = [
-            {"host": "example.com", "capability": c["token"]},
-            {"host": "example.net", "capability": second},
-        ]
-        for entry in file["capabilities"]:
-            gw.delegates[parse_capability(entry["capability"]).signer.lower()] = None
+        file["capabilities"] = [{"capability": c["token"]}, {"capability": second}]
+        gw.pend(c["signer"])
     return file, gw, listener.close
 
 
@@ -282,10 +268,7 @@ def contract(mode: Mode) -> Contract:
         mode=mode,
         gateway_url=file["gatewayUrl"],
         connect=file["connect"],
-        token=file.get("token"),
-        host=file.get("host"),
-        capability=file.get("capability"),
-        capabilities=[(e["host"], e["capability"]) for e in file.get("capabilities", [])],
+        capabilities=[e["capability"] for e in file.get("capabilities", [])],
         bundle=file["bundle"],
         files={k: bytes.fromhex(v) for k, v in file["files"].items()},
         blob=file["blob"],

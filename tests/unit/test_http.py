@@ -16,8 +16,10 @@ def test_status_maps_to_code(status: int, code: ErrorCode) -> None:
     assert err.body == "nope"
 
 
-def test_codes_has_twelve_entries() -> None:
-    assert len(CODES) == 12
+def test_codes_has_eleven_entries() -> None:
+    assert len(CODES) == 11
+    # A gateway asks for no credentials, so a 401 is a status the contract does not name.
+    assert error_of(401, httpx.Headers(), "nope").code == "HTTP"
 
 
 def test_unlisted_status_is_http() -> None:
@@ -36,6 +38,7 @@ def test_error_of_reads_json_402() -> None:
 def test_error_of_reads_link_and_retry_after_headers() -> None:
     headers = httpx.Headers({"retry-after": " 30 ", "link": f'<decdn:{_A}>; rel="alternate"'})
     err = error_of(503, headers, "")
+    assert err.code == "PAYMENT_REQUIRED"
     assert err.retry_after_secs == 30
     assert err.fallback_uri == f"decdn:{_A}"
     assert str(err) == "gateway answered 503"

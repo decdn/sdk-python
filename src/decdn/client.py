@@ -1,9 +1,9 @@
 """The clients: `Client` and `AsyncClient`, one of two contexts over a `decdn gateway`.
 
 - `public`: a gateway with `--public-url`; blobs from the bare host, entries from their site
-  host, every request paid by the operator.
-- `loopback`: the local gateway with its token; every request on the bare host, paid by the
-  capability that covers `host`.
+  host, every request paid with the capabilities the gateway holds.
+- `loopback`: the local gateway on a loopback address; every request on the bare host, paid with
+  the capabilities the gateway holds.
 
 Both clients plan with the same sans-I/O core and differ only in how they send.
 """
@@ -55,8 +55,8 @@ MAX_RETRY_WAIT_SECS = 86_400
 class Client:
     """A synchronous client over a gateway.
 
-    `token` and `host` open the loopback gateway; so does a gateway on `127.0.0.1`, `localhost`
-    or `::1`. `transport` stands in for the network (an `httpx.MockTransport` in tests).
+    A gateway on `127.0.0.1`, `localhost` or `::1` is the loopback gateway; any other is a public
+    one. `transport` stands in for the network (an `httpx.MockTransport` in tests).
     A `Client` is not safe for concurrent use from several threads.
     """
 
@@ -64,8 +64,6 @@ class Client:
         self,
         gateway_url: str,
         *,
-        token: str | None = None,
-        host: str | None = None,
         pointer: PointerDomain | None = None,
         transport: httpx.BaseTransport | None = None,
         verify: VerifyMode = "auto",
@@ -74,8 +72,6 @@ class Client:
     ) -> None:
         self._core = Core(
             gateway_url,
-            token=token,
-            host=host,
             pointer=pointer,
             verify=verify,
             manifest_cache_size=manifest_cache_size,
@@ -88,7 +84,7 @@ class Client:
         self.pointer: PointerApi = PointerApi(self)
         # The delegate and capability API (loopback gateway).
         self.loopback: LoopbackApi = LoopbackApi(self)
-        # A loopback request carries the token: it never goes through a proxy from the environment.
+        # A loopback request never goes through a proxy from the environment.
         self._http = httpx.Client(
             transport=transport,
             timeout=timeout,
@@ -100,8 +96,7 @@ class Client:
         self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
     ) -> httpx.Response:
         """Send a streamed request; a non-2xx answer is raised as a `DecdnError`."""
-        sent = {**self._core.auth_headers(), **headers} if self._core.is_bare(url) else headers
-        request = self._http.build_request(method, url, headers=sent, content=content)
+        request = self._http.build_request(method, url, headers=headers, content=content)
         try:
             response = self._http.send(request, stream=True)
         except httpx.HTTPError as e:
@@ -244,8 +239,6 @@ class AsyncClient:
         self,
         gateway_url: str,
         *,
-        token: str | None = None,
-        host: str | None = None,
         pointer: PointerDomain | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         verify: VerifyMode = "auto",
@@ -254,8 +247,6 @@ class AsyncClient:
     ) -> None:
         self._core = Core(
             gateway_url,
-            token=token,
-            host=host,
             pointer=pointer,
             verify=verify,
             manifest_cache_size=manifest_cache_size,
@@ -268,7 +259,7 @@ class AsyncClient:
         self.pointer: AsyncPointerApi = AsyncPointerApi(self)
         # The delegate and capability API (loopback gateway).
         self.loopback: AsyncLoopbackApi = AsyncLoopbackApi(self)
-        # A loopback request carries the token: it never goes through a proxy from the environment.
+        # A loopback request never goes through a proxy from the environment.
         self._http = httpx.AsyncClient(
             transport=transport,
             timeout=timeout,
@@ -282,8 +273,7 @@ class AsyncClient:
         self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
     ) -> httpx.Response:
         """Send a streamed request; a non-2xx answer is raised as a `DecdnError`."""
-        sent = {**self._core.auth_headers(), **headers} if self._core.is_bare(url) else headers
-        request = self._http.build_request(method, url, headers=sent, content=content)
+        request = self._http.build_request(method, url, headers=headers, content=content)
         try:
             response = await self._http.send(request, stream=True)
         except httpx.HTTPError as e:

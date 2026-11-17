@@ -12,7 +12,6 @@ from decdn.errors import DecdnError, ErrorCode
 
 CODES: dict[int, ErrorCode] = {
     400: "BAD_URI",
-    401: "UNAUTHORIZED",
     402: "PAYMENT_REQUIRED",
     403: "FORBIDDEN",
     404: "NOT_FOUND",
@@ -22,7 +21,7 @@ CODES: dict[int, ErrorCode] = {
     422: "UNPROCESSABLE",
     429: "RATE_LIMITED",
     502: "UPSTREAM",
-    503: "POOL_UNFUNDED",
+    503: "PAYMENT_REQUIRED",
 }
 
 _LINK = re.compile(r'<(decdn:[^>]+)>\s*;\s*rel="?alternate"?')

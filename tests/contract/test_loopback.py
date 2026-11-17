@@ -7,6 +7,7 @@ registered. Every flavour's capability is issued to the gateway's one pending ke
 own pool, and each flavour registers its own.
 """
 
+import json
 import re
 from collections.abc import Iterator
 
@@ -41,8 +42,8 @@ async def test_refuses_an_unknown_host(contract: Contract, flavour: Driver) -> N
     assert r.status_code == 403
 
 
-# No token, a browser-header gate on content, the pending delegate key, capabilities without a
-# scope, and payment by the held capabilities in registration order: decdn/decdn's gateway after
+# No token, a browser-header gate on content, the pending delegate key, capabilities registered
+# with a scope, and payment by the held capabilities in registration order: decdn/decdn's gateway after
 # release 0.3.1. A released gateway up to 0.3.1 wants a token and a page host, so it never collects
 # these tests.
 if shipped_after("0.3.1"):
@@ -64,15 +65,29 @@ if shipped_after("0.3.1"):
         assert again.address == first.address
         assert first.address.lower() == parse_capability(contract.capability(client)).signer.lower()
 
+    async def test_refuses_a_capability_registered_without_a_scope(
+        contract: Contract, flavour: Driver
+    ) -> None:
+        c = contract
+        r = await c.fetch(
+            flavour,
+            f"{c.gateway_url}/_capability",
+            method="PUT",
+            headers={"content-type": "application/json"},
+            content=json.dumps({"capability": c.capability(flavour)}).encode(),
+        )
+        assert r.status_code == 422
+
     async def test_registers_a_capability_from_each_pool_on_the_one_key(
         contract: Contract, flavour: Driver, client: Driver
     ) -> None:
         capability = contract.capability(flavour)
-        registered = await client.loopback_register(capability=capability)
+        registered = await client.loopback_register(capability=capability, scope="any")
         grant = parse_capability(capability)
         assert registered.signer.lower() == grant.signer.lower()
         assert registered.pool.lower() == grant.pool_id.lower()
         assert registered.expiry == grant.expiry
+        assert registered.namespaces is None
 
     async def test_lists_the_capabilities_in_registration_order(
         contract: Contract, flavour: Driver, client: Driver
@@ -97,7 +112,9 @@ if shipped_after("0.3.1"):
     async def test_refuses_a_second_capability_from_one_pool_on_one_key(
         contract: Contract, flavour: Driver, client: Driver
     ) -> None:
-        await rejects(client.loopback_register(capability=contract.capability(flavour)), "CONFLICT")
+        await rejects(
+            client.loopback_register(capability=contract.capability(flavour), scope="any"), "CONFLICT"
+        )
 
     async def test_creates_a_fresh_pending_key_once_a_capability_claims_it(
         contract: Contract, flavour: Driver, client: Driver

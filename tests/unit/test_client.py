@@ -245,7 +245,7 @@ async def test_maps_a_public_gateway_with_no_capability_to_pool_unfunded_with_th
     fake = FakeGateway("public")
     blob = fake.add_blob("x")
     c = await flavour.open(fake)
-    e = await rejects(c.get(f"decdn:{blob}?ns=7"), "POOL_UNFUNDED")
+    e = await rejects(c.get(f"decdn:{blob}?ns=7"), "PAYMENT_REQUIRED")
     assert e.status == 503
     assert e.fallback_uri == f"decdn:{blob}?ns=7"
     assert e.retry_after_secs == 60
@@ -255,7 +255,7 @@ async def test_maps_a_pool_that_cannot_pay_to_pool_unfunded(flavour: Driver) -> 
     fake, _, blob = public_fake()
     fake.unfunded.add(blob)
     c = await flavour.open(fake)
-    e = await rejects(c.get(f"decdn:{blob}"), "POOL_UNFUNDED")
+    e = await rejects(c.get(f"decdn:{blob}"), "PAYMENT_REQUIRED")
     assert e.retry_after_secs == 60
     assert e.fallback_uri == f"decdn:{blob}"
 
@@ -278,7 +278,7 @@ async def test_retry_cap_refuses_long_wait(flavour: Driver, monkeypatch: pytest.
     fake.unfunded.add(blob)
     waits = on_sleep(monkeypatch, flavour)
     c = await flavour.open(fake)
-    e = await rejects(c.get(f"decdn:{blob}", retry=1.0), "POOL_UNFUNDED")
+    e = await rejects(c.get(f"decdn:{blob}", retry=1.0), "PAYMENT_REQUIRED")
     assert e.retry_after_secs == 60
     assert waits == []
     assert len(fake.seen) == 1
@@ -542,11 +542,11 @@ async def test_maps_a_raw_blobs_head_refusals_as_its_gets(flavour: Driver) -> No
     fake = FakeGateway("public")
     blob = fake.add_blob("x")
     c = await flavour.open(fake)
-    await rejects(c.head(f"decdn:{blob}"), "POOL_UNFUNDED")
+    await rejects(c.head(f"decdn:{blob}"), "PAYMENT_REQUIRED")
     funded, _, funded_blob = public_fake()
     funded.unfunded.add(funded_blob)
     d = await flavour.open(funded)
-    await rejects(d.head(f"decdn:{funded_blob}"), "POOL_UNFUNDED")
+    await rejects(d.head(f"decdn:{funded_blob}"), "PAYMENT_REQUIRED")
 
 
 def test_pays_a_raw_blobs_proof_once_under_a_sites_decdn_too() -> None:

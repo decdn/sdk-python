@@ -291,7 +291,7 @@ def test_public_capability_api_on_the_bare_host() -> None:
         assert r.status_code == 200
         assert r.headers["access-control-allow-origin"] == "*"
         fake.pend(cap["signer"])
-        r = c.put(f"{fake.url}/_capability", content=json.dumps({"capability": cap["token"]}))
+        r = c.put(f"{fake.url}/_capability", content=json.dumps({"capability": cap["token"], "scope": "any"}))
         assert r.status_code == 201
         listed = c.get(f"{fake.url}/_capability").json()
         assert [e["pool"] for e in listed] == [cap["poolId"]]
@@ -309,7 +309,7 @@ def test_delegate_register_list_409s() -> None:
     cap = fixture_json("capability")
     signer = cap["signer"]
     fake = FakeGateway("loopback")
-    body = json.dumps({"capability": cap["token"]})
+    body = json.dumps({"capability": cap["token"], "scope": "any"})
     with client(fake) as c:
         # The API takes no token.
         r = c.get(f"{fake.url}/_delegate")
@@ -332,15 +332,21 @@ def test_delegate_register_list_409s() -> None:
             409,
             "that key already holds a capability from this pool: get a new key from GET /_delegate\n",
         )
-        # The same key takes a capability from another pool.
+        # The same key takes a capability from another pool, scoped to namespaces it echoes.
         other = issue(cap, pool="0x" + "c4" * 32)
-        assert c.put(f"{fake.url}/_capability", content=json.dumps({"capability": other})).status_code == 201
+        scope = {"namespaces": [7, 2**64 - 1], "signature": "0x" + "ab" * 65}
+        r = c.put(f"{fake.url}/_capability", content=json.dumps({"capability": other, "scope": scope}))
+        assert (r.status_code, r.text) == (
+            201,
+            f'{{"expiry":1900000000,"namespaces":[7,18446744073709551615],"pool":"0x{"c4" * 32}",'
+            f'"signer":"{checksum(signer)}"}}',
+        )
         listed = c.get(f"{fake.url}/_capability")
         assert listed.text == (
             f'[{{"cap":10000000,"expiry":1900000000,"pool":"{cap["poolId"]}",'
             f'"signer":"{checksum(signer)}","spent":false}},'
-            f'{{"cap":10000000,"expiry":1900000000,"pool":"0x{"c4" * 32}",'
-            f'"signer":"{checksum(signer)}","spent":false}}]'
+            f'{{"cap":10000000,"expiry":1900000000,"namespaces":[7,18446744073709551615],'
+            f'"pool":"0x{"c4" * 32}","signer":"{checksum(signer)}","spent":false}}]'
         )
         # Expired capabilities drop out of the list.
         fake.capabilities[0].expiry = int(time.time())
@@ -358,18 +364,40 @@ def test_register_422s() -> None:
         with client(fake) as c:
             return c.put(f"{fake.url}/_capability", content=body)
 
-    r = put(json.dumps({"capability": cap["token"], "scope": "example.com"}))
-    assert (r.status_code, r.text) == (422, 'expected {"capability"}\n')
-    assert put('{"scope":"x"}').status_code == 422
-    assert put('{"capability":7}').status_code == 422
+    # No scope.
+    r = put(json.dumps({"capability": cap["token"]}))
+    assert (r.status_code, r.text) == (422, 'expected {"capability","scope"}\n')
+    r = put(json.dumps({"capability": cap["token"], "scope": "any", "extra": 1}))
+    assert (r.status_code, r.text) == (422, 'expected {"capability","scope"}\n')
+    assert put('{"scope":"any"}').status_code == 422
+    assert put('{"capability":7,"scope":"any"}').status_code == 422
     assert put("nope").status_code == 422
-    assert put(json.dumps({"capability": "dcap1:AAAA"})).status_code == 422
-    r = put(json.dumps({"capability": issue(cap, cap_=0)}))
+    sig = "0x" + "ab" * 65
+    for scope in (
+        "example.com",
+        None,
+        {"namespaces": [], "signature": sig},
+        {"namespaces": [0], "signature": sig},
+        {"namespaces": [2**64], "signature": sig},
+        {"namespaces": [True], "signature": sig},
+        {"namespaces": ["7"], "signature": sig},
+        {"namespaces": [7], "signature": "0x" + "ab" * 64},
+        {"namespaces": [7], "signature": "ab" * 65},
+        {"namespaces": [7]},
+        {"namespaces": [7], "signature": sig, "extra": 1},
+    ):
+        r = put(json.dumps({"capability": cap["token"], "scope": scope}))
+        assert (r.status_code, r.text) == (
+            422,
+            'expected a scope of "any" or {"namespaces","signature"}\n',
+        ), scope
+    assert put(json.dumps({"capability": "dcap1:AAAA", "scope": "any"})).status_code == 422
+    r = put(json.dumps({"capability": issue(cap, cap_=0), "scope": "any"}))
     assert (r.status_code, r.text) == (422, "the capability's cap is 0\n")
     soon = int(time.time()) + EXPIRY_MARGIN_SECS
-    r = put(json.dumps({"capability": issue(cap, expiry=soon)}))
+    r = put(json.dumps({"capability": issue(cap, expiry=soon), "scope": "any"}))
     assert (r.status_code, r.text) == (422, "the capability expires inside the expiry margin\n")
-    assert put(json.dumps({"capability": cap["token"] + " " * 70_000})).status_code == 413
+    assert put(json.dumps({"capability": cap["token"] + " " * 70_000, "scope": "any"})).status_code == 413
     assert fake.capabilities == []
 
 
@@ -526,7 +554,9 @@ async def test_listen_serves_an_async_client() -> None:
             fake.grant()
             r = await c.get(f"{fake.url}/{h}")
             assert (r.status_code, r.content) == (200, b"hello")
-            r = await c.put(f"{fake.url}/_capability", content=json.dumps({"capability": "nope"}))
+            r = await c.put(
+                f"{fake.url}/_capability", content=json.dumps({"capability": "nope", "scope": "any"})
+            )
             assert r.status_code == 422
     finally:
         listener.close()

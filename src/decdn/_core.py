@@ -33,7 +33,7 @@ Verified = bool | Literal["skipped"]
 _DIGITS = re.compile(r"[0-9]+")
 _ETAG = re.compile(r'"?([0-9a-fA-F]{64})"?')
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
-_RETRYABLE = frozenset({"PAYMENT_REQUIRED", "POOL_UNFUNDED", "RATE_LIMITED"})
+_RETRYABLE = frozenset({"PAYMENT_REQUIRED", "RATE_LIMITED"})
 
 
 @dataclass(frozen=True)

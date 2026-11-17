@@ -21,7 +21,7 @@ CODES: dict[int, ErrorCode] = {
     422: "UNPROCESSABLE",
     429: "RATE_LIMITED",
     502: "UPSTREAM",
-    503: "POOL_UNFUNDED",
+    503: "PAYMENT_REQUIRED",
 }
 
 _LINK = re.compile(r'<(decdn:[^>]+)>\s*;\s*rel="?alternate"?')

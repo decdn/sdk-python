@@ -30,8 +30,10 @@ EXPECTED = [
     "create_blake3",
     # loopback
     "AsyncLoopbackApi",
+    "CapabilityScope",
     "Delegate",
     "LoopbackApi",
+    "NamespaceScope",
     "RegisteredCapability",
     "Registration",
     # manifest

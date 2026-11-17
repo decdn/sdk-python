@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from decdn.loopback import Delegate, RegisteredCapability, Registration
+from decdn.loopback import Delegate, NamespaceScope, RegisteredCapability, Registration
 from tests.conftest import fixture_json
 from tests.fake_gateway import FakeGateway
 from tests.support.flavour import Driver, rejects
@@ -14,6 +14,8 @@ pytestmark = pytest.mark.anyio
 
 capability = fixture_json("capability")
 OTHER_POOL = "0x" + "b3" * 32
+# A well-formed scope signature; the fake checks its shape alone.
+SCOPE_SIGNATURE = "0x" + "5c" * 65
 
 
 def issued(pool: str, signer: str = capability["signer"], expiry: int = int(capability["expiry"])) -> str:
@@ -35,16 +37,25 @@ async def test_returns_the_pending_key_registers_capabilities_on_it_and_lists_th
     assert len(delegate.address) == 42 and delegate.address.startswith("0x")
     assert (await c.loopback_delegate()) == delegate
     fake.pend(capability["signer"])
-    registered = await c.loopback_register(capability=capability["token"])
+    registered = await c.loopback_register(capability=capability["token"], scope="any")
     assert isinstance(registered, Registration)
     assert registered.signer.lower() == capability["signer"]
     assert (registered.pool, registered.expiry) == (capability["poolId"], int(capability["expiry"]))
-    # The claimed key takes a capability from another pool too.
-    second = await c.loopback_register(issued(OTHER_POOL))
-    assert second.pool == OTHER_POOL
+    assert registered.namespaces is None
+    # The claimed key takes a capability from another pool too, scoped to namespaces.
+    scope = NamespaceScope(namespaces=[7, 2**64 - 1], signature=SCOPE_SIGNATURE)
+    second = await c.loopback_register(issued(OTHER_POOL), scope)
+    assert (second.pool, second.namespaces) == (OTHER_POOL, [7, 2**64 - 1])
     listed = await c.loopback_capabilities()
     assert [
-        RegisteredCapability(signer=r.signer.lower(), pool=r.pool, cap=r.cap, expiry=r.expiry, spent=r.spent)
+        RegisteredCapability(
+            signer=r.signer.lower(),
+            pool=r.pool,
+            cap=r.cap,
+            expiry=r.expiry,
+            spent=r.spent,
+            namespaces=r.namespaces,
+        )
         for r in listed
     ] == [
         RegisteredCapability(
@@ -53,12 +64,19 @@ async def test_returns_the_pending_key_registers_capabilities_on_it_and_lists_th
             cap=int(capability["spendingCap"]),
             expiry=int(capability["expiry"]),
             spent=False,
+            namespaces=namespaces,
         )
-        for pool in (capability["poolId"], OTHER_POOL)
+        for pool, namespaces in ((capability["poolId"], None), (OTHER_POOL, [7, 2**64 - 1]))
     ]
-    put = next(s for s in fake.seen if s.method == "PUT")
-    assert put.headers.get("content-type") == "application/json"
-    assert json.loads(put.content) == {"capability": capability["token"]}
+    puts = [s for s in fake.seen if s.method == "PUT"]
+    assert all(put.headers.get("content-type") == "application/json" for put in puts)
+    assert [json.loads(put.content) for put in puts] == [
+        {"capability": capability["token"], "scope": "any"},
+        {
+            "capability": issued(OTHER_POOL),
+            "scope": {"namespaces": [7, 2**64 - 1], "signature": SCOPE_SIGNATURE},
+        },
+    ]
     # A claimed key leaves no pending one: the next call creates a fresh key, and keeps it.
     fresh = await c.loopback_delegate()
     assert fresh.address.lower() != capability["signer"]
@@ -69,12 +87,17 @@ async def test_maps_the_apis_refusals(flavour: Driver) -> None:
     fake = FakeGateway("loopback")
     c = await flavour.open(fake)
     # A key the gateway does not hold.
-    await rejects(c.loopback_register(capability["token"]), "CONFLICT")
+    await rejects(c.loopback_register(capability["token"], "any"), "CONFLICT")
     fake.pend(capability["signer"])
-    await c.loopback_register(capability["token"])
+    # A malformed scope: the SDK passes it through, and the gateway refuses it.
+    await rejects(
+        c.loopback_register(capability["token"], NamespaceScope(namespaces=[], signature=SCOPE_SIGNATURE)),
+        "UNPROCESSABLE",
+    )
+    await c.loopback_register(capability["token"], "any")
     # A second capability from one pool on one key.
-    await rejects(c.loopback_register(capability["token"]), "CONFLICT")
-    await rejects(c.loopback_register("dcap1:AAAA"), "UNPROCESSABLE")
+    await rejects(c.loopback_register(capability["token"], "any"), "CONFLICT")
+    await rejects(c.loopback_register("dcap1:AAAA", "any"), "UNPROCESSABLE")
 
 
 async def test_passes_the_browser_header_gate_as_a_client_outside_a_browser(flavour: Driver) -> None:

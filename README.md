@@ -139,7 +139,7 @@ async with AsyncClient("https://decdn.link") as client:
 
 A public gateway pays with the capabilities its operator registered on it, in
 the order they were registered. When none can pay, a request the gateway must
-pull fails with `POOL_UNFUNDED`, carrying `retry_after_secs` and the
+pull fails with `PAYMENT_REQUIRED`, carrying `retry_after_secs` and the
 `fallback_uri` to fetch with a paying client of your own; a response its cache
 holds whole still comes, at no cost.
 
@@ -151,22 +151,34 @@ too; leaving the block closes the connection if the body was not read.
 A loopback gateway pays with capabilities a pool owner issued to its delegate
 keys. The gateway holds one pending key: `delegate()` returns the same address
 until a capability claims it, and a fresh key after that. Have the owner
-assign the pending key, then register the capability:
+assign the pending key, then register the capability with the scope it pays
+for:
 
 ```python
-from decdn import AsyncClient, Client
+from decdn import AsyncClient, Client, NamespaceScope
 
 with Client("http://127.0.0.1:8484") as client:
     delegate = client.loopback.delegate()
     # The pool owner: decdn pool assign --pool <id> --signer <delegate.address> ...
-    client.loopback.register_capability("dcap1:...")
+    client.loopback.register_capability("dcap1:...", "any")
     r = client.get("decdn:<64 hex>")
 
 async with AsyncClient("http://127.0.0.1:8484") as client:
     delegate = await client.loopback.delegate()
-    await client.loopback.register_capability("dcap1:...")
-    r = await client.get("decdn:<64 hex>")
+    scope = NamespaceScope(namespaces=[7, 9], signature="0x...")
+    await client.loopback.register_capability("dcap1:...", scope)
+    r = await client.get("decdn:<64 hex>?ns=7")
 ```
+
+The scope is required. `"any"` pays for any content. A `NamespaceScope` pays
+only for requests that name one of its namespaces (`?ns=<id>` in the `decdn:`
+URI, or a site host `<ns>.<label>.localhost`), and carries the pool owner's
+EIP-712 signature over `CapabilityScope(address signer,bytes32 poolId,uint256[] namespaces)`
+(domain `decdn-capability-scope`, version `1`, the chain id, and the
+PaymentPool as the verifying contract). The SDK sends the signature as given;
+the gateway checks it and refuses a malformed scope or a signature that does
+not recover the pool's owner with `UNPROCESSABLE`. A request that names no
+namespace is paid only by `"any"` capabilities.
 
 A key holds one capability per pool, and capabilities from several pools.
 `client.loopback.capabilities()` lists what the gateway holds in the order it
@@ -215,8 +227,7 @@ Every failure is a `DecdnError` with a stable `code`:
 
 | Code                    | When                                                                                                |
 | ----------------------- | --------------------------------------------------------------------------------------------------- |
-| `PAYMENT_REQUIRED`      | 402: no capability the loopback gateway holds can pay                                               |
-| `POOL_UNFUNDED`         | 503: no capability the public gateway holds can pay                                                 |
+| `PAYMENT_REQUIRED`      | 402 (loopback) or 503 (public): no capability the gateway holds can pay                             |
 | `NOT_FOUND`             | 404                                                                                                 |
 | `RANGE_NOT_SATISFIABLE` | 416: the range starts past the end; `size` holds the entry's size                                   |
 | `FORBIDDEN`             | 403                                                                                                 |
@@ -298,7 +309,7 @@ are the deployment the gateway verifies against.
 | `client.manifest(hash_or_uri)`                                                          | A bundle's verified manifest, cached per client                                                                                                                               |
 | `client.site_url(uri)`, `client.namespace_url(ns)`                                      | The site URL of a bundle or entry; the URL a namespace's pointer serves at (`https://<ns>.<host>/`). Neither makes a request                                                  |
 | `client.loopback.delegate()`                                                            | The loopback gateway's pending delegate key: the same address until a capability claims it                                                                                    |
-| `client.loopback.register_capability(capability)`, `.capabilities()`                    | Registers a `dcap1:` capability issued to a key the gateway holds; lists the capabilities the gateway holds, in the order it pays with them                                   |
+| `client.loopback.register_capability(capability, scope)`, `.capabilities()`             | Registers a `dcap1:` capability issued to a key the gateway holds, for scope `"any"` or a `NamespaceScope`; lists the capabilities the gateway holds, in the order it pays with them, with the `namespaces` of a scoped one |
 | `client.pointer.set(namespace=, root=, seq=, signer=)`                                  | Signs and publishes a namespace pointer on a public gateway                                                                                                                   |
 | `pointer_typed_data`, `pointer_signing_hash`, `sign_pointer`, `recover_pointer_signer`  | The pointer's EIP-712 typed data and signing hash, its signature, and the signer a signature recovers to                                                                      |
 | `parse_uri`, `format_uri`                                                               | Parse and canonically format a `decdn:` URI, following the Rust client's grammar exactly (`BAD_URI` on anything it refuses)                                                   |

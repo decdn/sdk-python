@@ -2,19 +2,39 @@
 (https://github.com/decdn/decdn/blob/main/crates/cli/src/commands/gateway.rs):
 
 `GET /_delegate` returns the gateway's pending delegate key, `PUT /_capability` registers a `dcap1:`
-capability issued to a key the gateway holds, `GET /_capability` lists the registered ones in the
-order the gateway pays with them. Keys and capabilities live in the gateway's memory: a restart
-drops every one.
+capability issued to a key the gateway holds, with the scope of content it pays for,
+`GET /_capability` lists the registered ones in the order the gateway pays with them. Keys and
+capabilities live in the gateway's memory: a restart drops every one.
 """
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from decdn.errors import DecdnError
 
 if TYPE_CHECKING:
     from decdn.client import AsyncClient, Client
+
+
+@dataclass(frozen=True)
+class NamespaceScope:
+    """A capability scope that pays only for content of `namespaces`.
+
+    The pool's on-chain owner signs EIP-712 `CapabilityScope(address signer,bytes32 poolId,
+    uint256[] namespaces)` (domain `decdn-capability-scope`, version `1`, the chain id, and the
+    PaymentPool as the verifying contract), with the capability's `signer` and `poolId`. The SDK
+    sends `signature` as given; the gateway checks it.
+    """
+
+    # Namespace ids, at least one, each 1 or more.
+    namespaces: list[int]
+    # The owner's 65-byte signature, `0x` hex.
+    signature: str
+
+
+CapabilityScope = Literal["any"] | NamespaceScope
+"""What a capability pays for: `"any"` content, or only the content of a `NamespaceScope`."""
 
 
 @dataclass(frozen=True)
@@ -32,6 +52,8 @@ class Registration:
     pool: str
     # Unix-seconds expiry.
     expiry: int
+    # The namespaces a namespace-scoped capability pays for; `None` for scope `"any"`.
+    namespaces: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +68,8 @@ class RegisteredCapability:
     expiry: int
     # Whether a pull stopped for funding on it; the gateway pays with it no more.
     spent: bool
+    # The namespaces a namespace-scoped capability pays for; `None` for scope `"any"`.
+    namespaces: list[int] | None = None
 
 
 def _check(context: str) -> None:
@@ -57,8 +81,13 @@ def _headers(has_body: bool) -> dict[str, str]:
     return {"content-type": "application/json"} if has_body else {}
 
 
-def _registration_body(capability: str) -> bytes:
-    return json.dumps({"capability": capability}).encode()
+def _registration_body(capability: str, scope: CapabilityScope) -> bytes:
+    wire: str | dict[str, Any] = (
+        scope
+        if isinstance(scope, str)
+        else {"namespaces": list(scope.namespaces), "signature": scope.signature}
+    )
+    return json.dumps({"capability": capability, "scope": wire}).encode()
 
 
 def _delegate(data: bytes) -> Delegate:
@@ -67,7 +96,12 @@ def _delegate(data: bytes) -> Delegate:
 
 def _registration(data: bytes) -> Registration:
     parsed = json.loads(data)
-    return Registration(signer=parsed["signer"], pool=parsed["pool"], expiry=parsed["expiry"])
+    return Registration(
+        signer=parsed["signer"],
+        pool=parsed["pool"],
+        expiry=parsed["expiry"],
+        namespaces=parsed.get("namespaces"),
+    )
 
 
 def _capabilities(data: bytes) -> list[RegisteredCapability]:
@@ -79,6 +113,7 @@ def _capabilities(data: bytes) -> list[RegisteredCapability]:
             cap=i["cap"],
             expiry=i["expiry"],
             spent=i["spent"],
+            namespaces=i.get("namespaces"),
         )
         for i in items
     ]
@@ -107,13 +142,16 @@ class LoopbackApi:
         """
         return _delegate(self._call("GET", "/_delegate"))
 
-    def register_capability(self, capability: str) -> Registration:
-        """Register `capability`, a `dcap1:` issued to a key the gateway holds.
+    def register_capability(self, capability: str, scope: CapabilityScope) -> Registration:
+        """Register `capability`, a `dcap1:` issued to a key the gateway holds, to pay for `scope`.
 
-        A key holds one capability per pool: a key the gateway does not hold, or a second
-        capability from the same pool on one key, raises `CONFLICT`.
+        `scope` is `"any"` (any content) or a `NamespaceScope` the pool's owner signed (only the
+        content of its namespaces). A key holds one capability per pool: a key the gateway does
+        not hold, or a second capability from the same pool on one key, raises `CONFLICT`. A
+        malformed scope, or a scope signature that does not recover the pool's owner, raises
+        `UNPROCESSABLE`.
         """
-        return _registration(self._call("PUT", "/_capability", _registration_body(capability)))
+        return _registration(self._call("PUT", "/_capability", _registration_body(capability, scope)))
 
     def capabilities(self) -> list[RegisteredCapability]:
         """Return the capabilities the gateway holds, in the order it pays with them."""
@@ -139,9 +177,9 @@ class AsyncLoopbackApi:
         """Return the gateway's pending delegate key: `LoopbackApi`'s."""
         return _delegate(await self._call("GET", "/_delegate"))
 
-    async def register_capability(self, capability: str) -> Registration:
-        """Register `capability`, a `dcap1:` issued to a key the gateway holds: `LoopbackApi`'s."""
-        return _registration(await self._call("PUT", "/_capability", _registration_body(capability)))
+    async def register_capability(self, capability: str, scope: CapabilityScope) -> Registration:
+        """Register `capability` to pay for `scope`: `LoopbackApi`'s."""
+        return _registration(await self._call("PUT", "/_capability", _registration_body(capability, scope)))
 
     async def capabilities(self) -> list[RegisteredCapability]:
         """Return the capabilities the gateway holds, in the order it pays with them."""

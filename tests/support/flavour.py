@@ -8,6 +8,7 @@ import pytest
 
 from decdn.client import AsyncClient, ByteRange, Client, Context, HeadInfo, Resolved, VerifyMode
 from decdn.errors import DecdnError, ErrorCode
+from decdn.loopback import CapabilityScope
 from decdn.manifest import BundleManifest
 from decdn.response import AsyncResponse, Response
 from decdn.uri import DecdnUri
@@ -120,11 +121,11 @@ class Driver:
             return c.loopback.delegate()
         return await c.loopback.delegate()
 
-    async def loopback_register(self, capability: str) -> Any:
+    async def loopback_register(self, capability: str, scope: CapabilityScope) -> Any:
         c = self.client
         if isinstance(c, Client):
-            return c.loopback.register_capability(capability)
-        return await c.loopback.register_capability(capability)
+            return c.loopback.register_capability(capability, scope)
+        return await c.loopback.register_capability(capability, scope)
 
     async def loopback_capabilities(self) -> Any:
         c = self.client

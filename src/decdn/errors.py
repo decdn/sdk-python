@@ -3,10 +3,8 @@
 from typing import Literal
 
 ErrorCode = Literal[
-    # 402: no capability the loopback gateway holds can pay.
+    # 402 (loopback) or 503 (public): no capability the gateway holds can pay.
     "PAYMENT_REQUIRED",
-    # 503: no capability the public gateway holds can pay.
-    "POOL_UNFUNDED",
     # 404.
     "NOT_FOUND",
     # 416: the range starts past the end; `size` holds the entry's size.

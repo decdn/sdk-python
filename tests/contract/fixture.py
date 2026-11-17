@@ -129,15 +129,21 @@ class Contract:
         return httpx.AsyncClient(transport=AsyncHostTransport(self.connect), follow_redirects=False)
 
     async def fetch(
-        self, flavour: Driver, url: str, *, method: str = "GET", headers: dict[str, str] | None = None
+        self,
+        flavour: Driver,
+        url: str,
+        *,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
     ) -> httpx.Response:
         """Send one raw request through `http(flavour)` and return the answer, read."""
         http = self.http(flavour)
         if isinstance(http, httpx.Client):
             with http:
-                return http.request(method, url, headers=headers)
+                return http.request(method, url, headers=headers, content=content)
         async with http:
-            return await http.request(method, url, headers=headers)
+            return await http.request(method, url, headers=headers, content=content)
 
     def close(self) -> None:
         """Stop the fake's listener; a real gateway is the harness's to stop."""

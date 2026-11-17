@@ -75,6 +75,8 @@ _POINTER_BODY = re.compile(
     r'\s*"seq"\s*:\s*([0-9]+)\s*,\s*"signature"\s*:\s*"(0x[0-9a-fA-F]*)"\s*\}\s*'
 )
 _DECDN_REF = re.compile(r"decdn:([0-9a-fA-F]{64})")
+_SCOPE_SIGNATURE = re.compile(r"0x[0-9a-fA-F]{130}")
+_U64_MAX = 2**64 - 1
 _CSP = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'"
 
 
@@ -188,6 +190,29 @@ class Registered:
     expiry: int
     # A pull stopped for funding on it: the gateway pays with it no more.
     spent: bool = False
+    # The namespaces of a namespace scope; `None` for scope `"any"`.
+    namespaces: list[int] | None = None
+
+
+def _scope_namespaces(scope: Any) -> list[int] | None | Literal[False]:
+    """The namespaces a well-formed scope names (`None` for `"any"`), or `False` for a malformed one.
+
+    A namespace scope is `{"namespaces", "signature"}`: at least one u64 namespace, each 1 or more,
+    and a 65-byte `0x` hex signature. The fake checks its shape alone, not who signed it.
+    """
+    if scope == "any":
+        return None
+    if not isinstance(scope, dict) or set(scope) != {"namespaces", "signature"}:
+        return False
+    namespaces = scope["namespaces"]
+    signature = scope["signature"]
+    if not isinstance(namespaces, list) or len(namespaces) == 0:
+        return False
+    if not all(isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= _U64_MAX for n in namespaces):
+        return False
+    if not isinstance(signature, str) or _SCOPE_SIGNATURE.fullmatch(signature) is None:
+        return False
+    return list(namespaces)
 
 
 def checksum(address: str) -> str:
@@ -527,6 +552,7 @@ class FakeGateway:
             {
                 "cap": r.cap,
                 "expiry": r.expiry,
+                **({} if r.namespaces is None else {"namespaces": r.namespaces}),
                 "pool": r.pool,
                 "signer": checksum(r.signer),
                 "spent": r.spent,
@@ -536,20 +562,24 @@ class FakeGateway:
         ]
 
     def _register(self, req: httpx.Request) -> httpx.Response:
-        """`PUT /_capability`: a key the gateway holds takes the capability, one per pool."""
+        """`PUT /_capability`: a key the gateway holds takes the capability, one per pool, with the
+        scope it pays for."""
         body = _body_text(req)
         if _js_length(body) > MAX_BODY:
             return _text(413, "body too large\n")
         try:
             request = json.loads(body, parse_constant=_no_constant)
         except (ValueError, RecursionError) as e:
-            return _text(422, f'expected {{"capability"}}: {e}\n')
-        # The body names the capability and nothing else.
-        if not isinstance(request, dict) or set(request) != {"capability"}:
-            return _text(422, 'expected {"capability"}\n')
+            return _text(422, f'expected {{"capability","scope"}}: {e}\n')
+        # The body names the capability and its scope, and nothing else.
+        if not isinstance(request, dict) or set(request) != {"capability", "scope"}:
+            return _text(422, 'expected {"capability","scope"}\n')
         capability = request["capability"]
         if not isinstance(capability, str):
-            return _text(422, 'expected {"capability"}\n')
+            return _text(422, 'expected {"capability","scope"}\n')
+        namespaces = _scope_namespaces(request["scope"])
+        if namespaces is False:
+            return _text(422, 'expected a scope of "any" or {"namespaces","signature"}\n')
         try:
             grant = parse_capability(capability.strip())
         except DecdnError as e:
@@ -568,11 +598,25 @@ class FakeGateway:
                 "that key already holds a capability from this pool: get a new key from GET /_delegate\n",
             )
         self.capabilities.append(
-            Registered(signer=signer, pool=pool, cap=grant.spending_cap, expiry=grant.expiry)
+            Registered(
+                signer=signer,
+                pool=pool,
+                cap=grant.spending_cap,
+                expiry=grant.expiry,
+                namespaces=namespaces,
+            )
         )
         if self.pending == signer:
             self.pending = None
-        return _json(201, {"expiry": grant.expiry, "pool": pool, "signer": checksum(signer)})
+        return _json(
+            201,
+            {
+                "expiry": grant.expiry,
+                **({} if namespaces is None else {"namespaces": namespaces}),
+                "pool": pool,
+                "signer": checksum(signer),
+            },
+        )
 
     def _put_pointer(self, req: httpx.Request) -> httpx.Response:
         body = _body_text(req)

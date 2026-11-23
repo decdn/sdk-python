@@ -129,8 +129,9 @@ jobs:
           enable-cache: false
       # GH_TOKEN turns on zizmor's online audits (known-vulnerable actions).
       # zizmor's policy for action refs is in zizmor.yml. zizmor is pinned so a
-      # release with new audits cannot fail CI unannounced; Dependabot does not
-      # track the pin, so bump it by hand together with .pre-commit-config.yaml.
+      # release with new audits fails CI only in the PR that bumps the pin.
+      # Dependabot does not track it: bump it by hand here, in
+      # .pre-commit-config.yaml and in CONTRIBUTING.md.
       - run: uvx zizmor@1.33.0 --format=github .github
         env:
           GH_TOKEN: ${{ github.token }}

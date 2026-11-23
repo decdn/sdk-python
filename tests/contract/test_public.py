@@ -173,14 +173,14 @@ async def test_lets_any_origin_read_a_refusal(contract: Contract, flavour: Drive
 if shipped_after("0.3.1"):  # decdn/decdn#2818
 
     async def test_redirects_a_directory_and_serves_its_index_on_its_site_and_under_decdn(
-        contract: Contract, flavour: Driver, client: Driver
+        contract: Contract, flavour: Driver
     ) -> None:
         c = contract
         index = c.files["docs/index.html"]
-        site = httpx.URL(await client.site_url(f"decdn:{c.bundle}/"))
-        origin = f"{site.scheme}://{site.netloc.decode('ascii')}"
-        # A page's own request: the gateway takes a request without `Sec-Fetch-Mode` for a
-        # navigation, which `/_decdn/` redirects to the bundle's site.
+        gateway = httpx.URL(c.gateway_url)
+        origin = f"{gateway.scheme}://{hash_to_base32(c.bundle)}.{gateway.netloc.decode('ascii')}"
+        # The gateway treats a request without `Sec-Fetch-Mode` as a navigation and redirects it
+        # from `/_decdn/` to the bundle's site; these headers make it a page's own request.
         page_request = {"sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"}
         for base, query in ((origin, "?tab=2"), (f"{origin}/_decdn/{c.bundle}", "?ns=7")):
             for q in ("", query):
@@ -190,6 +190,9 @@ if shipped_after("0.3.1"):  # decdn/decdn#2818
                 page = await c.fetch(flavour, f"{base}/docs/{q}", headers=page_request)
                 assert page.status_code == 200, f"{base}/docs/{q}"
                 assert page.content == index
+        site_head = await c.fetch(flavour, f"{origin}/docs?tab=2", method="HEAD", headers=page_request)
+        assert site_head.status_code == 302
+        assert site_head.headers.get("location") == "docs/?tab=2"
         head = await c.fetch(
             flavour, f"{origin}/_decdn/{c.bundle}/docs/", method="HEAD", headers=page_request
         )

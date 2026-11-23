@@ -165,19 +165,37 @@ def test_head_etag() -> None:
 def test_site_directory_redirects_and_serves_its_index() -> None:
     fake = FakeGateway("public")
     m = fake.add_bundle({"docs/index.html": "<p>docs</p>", "a.txt": "x"})
-    site = f"http://{hash_to_base32(m.hash)}.decdn.test"
+    label = hash_to_base32(m.hash)
+    site = f"http://{label}.decdn.test"
+    page = {"sec-fetch-mode": "cors"}
     with client(fake) as c:
         for base, q in ((site, "?tab=2"), (f"{site}/_decdn/{m.hash}", "?ns=7")):
-            r = c.get(f"{base}/docs{q}")
+            r = c.get(f"{base}/docs{q}", headers=page)
             assert (r.status_code, r.headers["location"]) == (302, f"docs/{q}")
-            assert c.get(f"{base}/docs/{q}").text == "<p>docs</p>"
+            assert c.get(f"{base}/docs/{q}", headers=page).text == "<p>docs</p>"
         head = c.head(f"{site}/docs?tab=2")
         assert (head.status_code, head.headers["location"]) == (302, "docs/?tab=2")
         index = c.head(f"{site}/docs/")
         assert (index.status_code, index.headers["etag"]) == (200, f'"{m.entries[0].hash}"')
-        # The bundle root under `/_decdn/` is not a directory in the bundle.
-        assert c.get(f"{site}/_decdn/{m.hash}/a.txt").text == "x"
-        assert c.get(f"{fake.url}/{m.hash}/docs", follow_redirects=False).status_code == 302
+        # The bundle root under `/_decdn/` is not a directory in the bundle: it lists the bundle.
+        root = c.get(f"{site}/_decdn/{m.hash}/", headers=page)
+        assert (root.status_code, '<a href="docs/index.html">' in root.text) == (200, True)
+        assert c.get(f"{site}/_decdn/{m.hash}/nope/", headers=page).status_code == 404
+        bare = c.get(f"{fake.url}/{m.hash}/docs")
+        assert (bare.status_code, bare.headers["location"]) == (302, f"{site}/docs")
+
+
+def test_navigation_of_a_decdn_bundle_redirects_to_its_site() -> None:
+    fake = FakeGateway("public")
+    m = fake.add_bundle({"docs/index.html": "<p>docs</p>"})
+    label = hash_to_base32(m.hash)
+    site = f"http://{label}.decdn.test"
+    with client(fake) as c:
+        for mode in ({}, {"sec-fetch-mode": "navigate"}):
+            r = c.get(f"{site}/_decdn/{m.hash}/docs/?ns=7", headers=mode)
+            assert (r.status_code, r.headers["location"]) == (302, f"http://7.{label}.decdn.test/docs/")
+        r = c.get(f"{site}/_decdn/{m.hash}/docs")
+        assert (r.status_code, r.headers["location"]) == (302, f"{site}/docs")
 
 
 def test_head_of_a_decdn_directory_redirects_to_its_site_at_no_pull() -> None:

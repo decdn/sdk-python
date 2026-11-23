@@ -4,11 +4,14 @@ JSON body, the 416 size, the pointer 409 `seq`)."""
 
 import json
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import httpx
 
 from decdn.errors import DecdnError, ErrorCode
+
+_T = TypeVar("_T")
 
 CODES: dict[int, ErrorCode] = {
     400: "BAD_URI",
@@ -33,6 +36,22 @@ _RANGE_SIZE = re.compile(r"bytes \*/([0-9]+)")
 def is_success(status: int) -> bool:
     """Return whether `status` is a 2xx answer."""
     return 200 <= status <= 299
+
+
+def read_json(path: str, body: bytes, read: Callable[[Any], _T]) -> _T:
+    """Return what `read` makes of the JSON body of the gateway's success answer to `path`.
+
+    A body that is not JSON, or JSON `read` cannot take (a field missing or of the wrong type),
+    raises `HTTP`: the gateway answered outside its contract.
+    """
+    try:
+        return read(json.loads(body))
+    except (ValueError, KeyError, TypeError, RecursionError) as e:
+        raise DecdnError(
+            "HTTP",
+            f"the gateway's answer to {path} is not the JSON its contract names: {e!r}",
+            body=body.decode("utf-8", errors="replace"),
+        ) from e
 
 
 def network_error(url: str, exc: Exception) -> DecdnError:

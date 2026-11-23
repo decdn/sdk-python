@@ -5,6 +5,7 @@ Nothing here touches the network. `Client` and `AsyncClient` parse, plan with th
 and hand the answer back to it.
 """
 
+import ipaddress
 import json
 import re
 from collections import OrderedDict
@@ -32,7 +33,6 @@ Verified = bool | Literal["skipped"]
 
 _DIGITS = re.compile(r"[0-9]+")
 _ETAG = re.compile(r'"?([0-9a-fA-F]{64})"?')
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 _RETRYABLE = frozenset({"PAYMENT_REQUIRED", "RATE_LIMITED"})
 
 
@@ -126,6 +126,20 @@ def retry_wait(error: DecdnError, retry: bool | float) -> int | None:
     return error.retry_after_secs
 
 
+def _is_loopback(hostname: str) -> bool:
+    """Whether `hostname` names a loopback gateway: `localhost`, or an address the gateway counts
+    as loopback (`127.0.0.0/8` or `::1`; an IPv4-mapped address is not one)."""
+    if hostname == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return False
+    return address.is_loopback
+
+
 class Core:
     """A client's configuration, its manifest cache, and everything it decides without I/O."""
 
@@ -145,7 +159,7 @@ class Core:
         if gateway.scheme == "" or gateway.raw_host == b"" or (port is not None and not 0 <= port <= 65535):
             raise config(f"not a gateway URL: {gateway_url}")
         hostname = gateway.raw_host.decode("ascii")
-        self.context: Context = "loopback" if hostname in _LOOPBACK_HOSTS else "public"
+        self.context: Context = "loopback" if _is_loopback(hostname) else "public"
         self.scheme = gateway.scheme
         self.port = port
         bracketed = f"[{hostname}]" if ":" in hostname else hostname

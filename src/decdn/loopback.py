@@ -3,7 +3,7 @@
 
 `GET /_delegate` returns the gateway's pending delegate key, `PUT /_capability` registers a `dcap1:`
 capability issued to a key the gateway holds, with the scope of content it pays for,
-`GET /_capability` lists the registered ones in the order the gateway pays with them. Keys and
+`GET /_capability` lists the registered ones in registration order. Keys and
 capabilities live in the gateway's memory: a restart drops every one.
 """
 
@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from decdn._http import read_json
 from decdn.errors import DecdnError
 
 if TYPE_CHECKING:
@@ -23,14 +24,18 @@ class NamespaceScope:
 
     The pool's on-chain owner signs EIP-712 `CapabilityScope(address signer,bytes32 poolId,
     uint256[] namespaces)` (domain `decdn-capability-scope`, version `1`, the chain id, and the
-    PaymentPool as the verifying contract), with the capability's `signer` and `poolId`. The SDK
-    sends `signature` as given; the gateway checks it.
+    PaymentPool as the verifying contract), with the capability's `signer` and `poolId`
+    (https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#scope). The SDK sends
+    `signature` as given; the gateway checks it.
     """
 
-    # Namespace ids, at least one, each 1 or more.
-    namespaces: list[int]
+    # Namespace ids (u64), at least one; a list given here is kept as a tuple.
+    namespaces: tuple[int, ...]
     # The owner's 65-byte signature, `0x` hex.
     signature: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "namespaces", tuple(self.namespaces))
 
 
 CapabilityScope = Literal["any"] | NamespaceScope
@@ -53,7 +58,7 @@ class Registration:
     # Unix-seconds expiry.
     expiry: int
     # The namespaces a namespace-scoped capability pays for; `None` for scope `"any"`.
-    namespaces: list[int] | None = None
+    namespaces: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,12 +74,16 @@ class RegisteredCapability:
     # Whether a pull stopped for funding on it; the gateway pays with it no more.
     spent: bool
     # The namespaces a namespace-scoped capability pays for; `None` for scope `"any"`.
-    namespaces: list[int] | None = None
+    namespaces: tuple[int, ...] | None = None
 
 
 def _check(context: str) -> None:
     if context != "loopback":
-        raise DecdnError("CONFIG", "the delegate and capability API is a loopback gateway's alone")
+        raise DecdnError(
+            "CONFIG",
+            "the SDK offers the delegate and capability API on a loopback client alone: open one on "
+            "a localhost or loopback-address URL",
+        )
 
 
 def _headers(has_body: bool) -> dict[str, str]:
@@ -90,33 +99,49 @@ def _registration_body(capability: str, scope: CapabilityScope) -> bytes:
     return json.dumps({"capability": capability, "scope": wire}).encode()
 
 
+def _namespaces(value: Any) -> tuple[int, ...] | None:
+    """A listing's `namespaces`: absent (`None`) for scope `"any"`, else a list of integers."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in value):
+        raise TypeError(f"namespaces is not a list of integers: {value!r}")
+    return tuple(value)
+
+
 def _delegate(data: bytes) -> Delegate:
-    return Delegate(address=json.loads(data)["address"])
+    return read_json("/_delegate", data, lambda p: Delegate(address=p["address"]))
 
 
 def _registration(data: bytes) -> Registration:
-    parsed = json.loads(data)
-    return Registration(
-        signer=parsed["signer"],
-        pool=parsed["pool"],
-        expiry=parsed["expiry"],
-        namespaces=parsed.get("namespaces"),
+    return read_json(
+        "/_capability",
+        data,
+        lambda p: Registration(
+            signer=p["signer"],
+            pool=p["pool"],
+            expiry=p["expiry"],
+            namespaces=_namespaces(p.get("namespaces")),
+        ),
     )
 
 
 def _capabilities(data: bytes) -> list[RegisteredCapability]:
-    items: list[dict[str, Any]] = json.loads(data)
-    return [
-        RegisteredCapability(
-            signer=i["signer"],
-            pool=i["pool"],
-            cap=i["cap"],
-            expiry=i["expiry"],
-            spent=i["spent"],
-            namespaces=i.get("namespaces"),
-        )
-        for i in items
-    ]
+    def read(items: Any) -> list[RegisteredCapability]:
+        if not isinstance(items, list):
+            raise TypeError(f"expected a list, not {type(items).__name__}")
+        return [
+            RegisteredCapability(
+                signer=i["signer"],
+                pool=i["pool"],
+                cap=i["cap"],
+                expiry=i["expiry"],
+                spent=i["spent"],
+                namespaces=_namespaces(i.get("namespaces")),
+            )
+            for i in items
+        ]
+
+    return read_json("/_capability", data, read)
 
 
 class LoopbackApi:
@@ -154,7 +179,11 @@ class LoopbackApi:
         return _registration(self._call("PUT", "/_capability", _registration_body(capability, scope)))
 
     def capabilities(self) -> list[RegisteredCapability]:
-        """Return the capabilities the gateway holds, in the order it pays with them."""
+        """Return the capabilities the gateway holds, in registration order.
+
+        A request is paid by the first usable one scoped to the namespace it names, else by the
+        first usable `"any"` one.
+        """
         return _capabilities(self._call("GET", "/_capability"))
 
 
@@ -182,5 +211,5 @@ class AsyncLoopbackApi:
         return _registration(await self._call("PUT", "/_capability", _registration_body(capability, scope)))
 
     async def capabilities(self) -> list[RegisteredCapability]:
-        """Return the capabilities the gateway holds, in the order it pays with them."""
+        """Return the capabilities the gateway holds, in registration order: `LoopbackApi`'s."""
         return _capabilities(await self._call("GET", "/_capability"))

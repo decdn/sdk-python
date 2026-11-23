@@ -55,8 +55,8 @@ MAX_RETRY_WAIT_SECS = 86_400
 class Client:
     """A synchronous client over a gateway.
 
-    A gateway on `127.0.0.1`, `localhost` or `::1` is the loopback gateway; any other is a public
-    one. `transport` stands in for the network (an `httpx.MockTransport` in tests).
+    A gateway on `localhost` or a loopback address (`127.0.0.0/8`, `::1`) is the loopback gateway;
+    any other is a public one. `transport` stands in for the network (an `httpx.MockTransport` in tests).
     A `Client` is not safe for concurrent use from several threads.
     """
 

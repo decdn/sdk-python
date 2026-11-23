@@ -110,10 +110,24 @@ async def test_picks_the_context_from_the_gateway_url(flavour: Driver) -> None:
     fake, _, _ = public_fake()
     assert (await flavour.open(fake)).context == "public"
     loop = FakeGateway("loopback")
-    for url in ("http://127.0.0.1:8484", "http://localhost:8484", "http://[::1]:8484"):
+    for url in (
+        "http://127.0.0.1:8484",
+        "http://127.0.0.2:8484",
+        "http://localhost:8484",
+        "http://LOCALHOST:8484",
+        "http://[::1]:8484",
+        "http://[0:0:0:0:0:0:0:1]:8484",
+    ):
         c = await flavour.open(gateway_url=url, transport=loop.transport())
         assert c.context == "loopback", url
-    assert (await flavour.open(gateway_url="https://gw.example")).context == "public"
+    for url in (
+        "https://gw.example",
+        "http://decdn.localhost:8484",
+        "http://0.0.0.0:8484",
+        "http://[::ffff:127.0.0.1]:8484",
+        "http://128.0.0.1:8484",
+    ):
+        assert (await flavour.open(gateway_url=url)).context == "public", url
 
 
 async def test_refuses_a_url_that_names_no_gateway(flavour: Driver) -> None:
@@ -239,7 +253,7 @@ async def test_maps_a_range_past_the_end_to_range_not_satisfiable_with_the_size(
     assert e.status == 416
 
 
-async def test_maps_a_public_gateway_with_no_capability_to_pool_unfunded_with_the_fallback_uri(
+async def test_maps_a_public_gateway_with_no_capability_to_payment_required_with_the_fallback_uri(
     flavour: Driver,
 ) -> None:
     fake = FakeGateway("public")
@@ -251,7 +265,7 @@ async def test_maps_a_public_gateway_with_no_capability_to_pool_unfunded_with_th
     assert e.retry_after_secs == 60
 
 
-async def test_maps_a_pool_that_cannot_pay_to_pool_unfunded(flavour: Driver) -> None:
+async def test_maps_a_pull_no_capability_can_pay_to_payment_required(flavour: Driver) -> None:
     fake, _, blob = public_fake()
     fake.unfunded.add(blob)
     c = await flavour.open(fake)

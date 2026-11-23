@@ -33,6 +33,8 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # Hold new action releases for a week, so a compromised or retagged
+    # release has time to be caught. Security updates bypass this.
     cooldown:
       default-days: 7
     groups:

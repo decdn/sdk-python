@@ -128,8 +128,9 @@ jobs:
         with:
           enable-cache: false
       # The token turns on zizmor's online audits (known-vulnerable actions).
-      # Its policy for action refs is in zizmor.yml.
-      - run: uvx zizmor --format=github .github
+      # Its policy for action refs is in zizmor.yml. The pinned version keeps a
+      # new zizmor audit from failing CI before the repo is ready for it.
+      - run: uvx zizmor@1.33.1 --format=github .github
         env:
           GH_TOKEN: ${{ github.token }}
       - run: shellcheck scripts/*.sh

@@ -33,6 +33,10 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # Hold new action releases for a week before proposing them, so a
+    # compromised release has time to be caught. Security updates bypass this.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]

@@ -10,7 +10,8 @@ repos:
       - id: conventional-pre-commit
         stages: [commit-msg]
         args: [feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert, security]
+  # Keep in step with the zizmor pin in .github/workflows/ci.yml.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.31.1
+    rev: v1.33.0
     hooks:
       - id: zizmor

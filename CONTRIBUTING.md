@@ -46,7 +46,7 @@ commit.
 | `test`     | lint, mypy, a git-cliff parse check, tests and build on Python 3.11, 3.12 and 3.13         | `uv run ruff check . && uv run mypy && uv run pytest && uv build` |
 | `coverage` | tests with line and branch coverage on the PR's head commit, posted to GitHub Code Quality | `uv run pytest --cov`                                             |
 | `package`  | twine check and the wheel's contents                                                       | `scripts/check-package.sh`                                        |
-| `lint-ci`  | zizmor (policy in `zizmor.yml`) and shellcheck                                             | `uvx zizmor .github && shellcheck scripts/*.sh`                   |
+| `lint-ci`  | zizmor (policy in `zizmor.yml`) and shellcheck                                             | `uvx zizmor@1.33.0 .github && shellcheck scripts/*.sh`            |
 
 Separate workflows check the PR title (`PR title`) and run CodeQL on the
 Python and the workflows (`CodeQL`).

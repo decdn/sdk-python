@@ -581,11 +581,18 @@ class FakeGateway:
             {"content-type": "application/json"},
         )
 
-    def _site_location(self, uri: DecdnUri) -> str:
+    def _site_location(self, uri: DecdnUri, directory: bool = False) -> str:
+        """The URL of bundle or entry `uri` on its site, at its entry path.
+
+        With `directory`, `uri` names a directory's `index.html` (as `_directory_index` reads it),
+        and the URL drops `index.html` to name the directory itself.
+        """
         label = hash_to_base32(uri.hash)
         suffix = self._suffix
         host = f"{label}.{suffix}" if uri.namespace is None else f"{uri.namespace}.{label}.{suffix}"
         path = format_uri(DecdnUri(hash=uri.hash, kind=uri.kind, path=uri.path))[len("decdn:") + 64 :]
+        if directory and path.endswith("/index.html"):
+            path = path.removesuffix("index.html")
         return f"http://{host}{path}"
 
     def _site(self, req: httpx.Request, path: str, search: str, site: _SiteRef) -> httpx.Response:
@@ -602,16 +609,24 @@ class FakeGateway:
             if fetch_site not in ("same-origin", "none"):
                 return _text(403, "a site answers only its own pages and top-level navigation\n")
         if path.startswith("/_decdn/"):
+            rest, directory = _directory_index(path[len("/_decdn/") :])
             try:
-                uri = parse_uri(f"decdn:{path[len('/_decdn/') :]}{search}")
+                uri = parse_uri(f"decdn:{rest}{search}")
             except DecdnError as e:
                 return _text(400, f"{e}\n")
-            response = (
-                self._head_blob(uri)
-                if req.method == "HEAD" and uri.kind == "blob"
-                else self._serve(uri, "site", req.headers.get("range"))
-            )
+            # A request with no `Sec-Fetch-Mode` is taken as a navigation.
+            navigation = req.headers.get("sec-fetch-mode", "navigate") == "navigate"
+            if uri.kind != "blob" and (req.method == "HEAD" or navigation):
+                # A HEAD or a navigation of a bundle or an entry redirects to its site, without
+                # reading the manifest or charging the allowance.
+                response = _response(302, None, {"location": self._site_location(uri, directory)})
+            elif req.method == "HEAD":
+                response = self._head_blob(uri)
+            else:
+                response = self._serve(uri, "site", req.headers.get("range"), search)
         else:
+            # The query belongs to the page's scripts: the gateway interprets none of it, and a
+            # directory's redirect keeps it. A path ending in `/` serves its `index.html`.
             entry = f"{path}index.html" if len(path) > 1 and path.endswith("/") else path
             try:
                 uri = parse_uri(f"decdn:{site.hash}{entry}")
@@ -620,9 +635,9 @@ class FakeGateway:
             if site.namespace is not None:
                 uri = dataclasses.replace(uri, namespace=site.namespace)
             response = (
-                self._head_site(uri)
+                self._head_site(uri, search)
                 if req.method == "HEAD"
-                else self._serve(uri, "site", req.headers.get("range"))
+                else self._serve(uri, "site", req.headers.get("range"), search)
             )
         response.headers["content-security-policy"] = _CSP
         return response
@@ -636,13 +651,16 @@ class FakeGateway:
         except DecdnError as e:
             return _text(404, f"{e}\n")
 
-    def _head_site(self, uri: DecdnUri) -> httpx.Response:
+    def _head_site(self, uri: DecdnUri, search: str) -> httpx.Response:
+        """`HEAD` of a site's own path; a path that names a directory redirects to it with `search` kept."""
         manifest = self._manifest_of(uri.hash)
         if isinstance(manifest, httpx.Response):
             return manifest
         path = "index.html" if uri.kind == "bundle" else (uri.path or "")
         entry = manifest.entry(path)
         if entry is None:
+            if manifest.entry(f"{path}/index.html") is not None:
+                return _to_directory(uri, search)
             return _text(404, f"no entry {path}\n")
         headers = {
             "content-type": _site_type(path),
@@ -704,7 +722,10 @@ class FakeGateway:
             self._charge(PROOF_BYTES)
         self._proven.add(hash_)
 
-    def _serve(self, uri: DecdnUri, present: Literal["bare", "site"], range_: str | None) -> httpx.Response:
+    def _serve(
+        self, uri: DecdnUri, present: Literal["bare", "site"], range_: str | None, search: str = ""
+    ) -> httpx.Response:
+        """Serve `uri`; on a site, `search` is the request's query, which a directory's redirect keeps."""
         if self.mode == "public" and self.allowance <= 0:
             return self._refusal(
                 402, uri, self._seconds_to_midnight(), "the gateway's allowance is spent for today"
@@ -741,7 +762,7 @@ class FakeGateway:
                 )
             links = "".join(f'<li><a href="{e.path}">{e.path}</a></li>' for e in manifest.entries)
             return _response(200, f"<ul>{links}</ul>".encode(), {"content-type": "text/html; charset=utf-8"})
-        return self._entry(uri, manifest, present, range_)
+        return self._entry(uri, manifest, present, range_, search)
 
     def _entry(
         self,
@@ -749,10 +770,14 @@ class FakeGateway:
         manifest: BundleManifest,
         present: Literal["bare", "site"],
         range_: str | None,
+        search: str = "",
     ) -> httpx.Response:
+        """One entry, by its manifest path; on a site, a directory with an `index.html` redirects to it."""
         path = uri.path or ""
         entry = manifest.entry(path)
         if entry is None:
+            if present == "site" and manifest.entry(f"{path}/index.html") is not None:
+                return _to_directory(uri, search)
             return _text(404, f"no entry {path} in bundle\n")
         if entry.hash in self.unfunded:
             return self._refusal(503, uri, 60, "the gateway's pool cannot pay right now")
@@ -883,6 +908,28 @@ def _path_and_search(url: httpx.URL) -> tuple[str, str]:
     path = url.raw_path.split(b"?", 1)[0].decode("ascii")
     query = url.query.decode("ascii")
     return path, f"?{query}" if query else ""
+
+
+def _directory_index(rest: str) -> tuple[str, bool]:
+    """A site's `/_decdn/<rest>` path as the rest of a `decdn:` URI, and whether it names a directory.
+
+    `<hash>/<dir>/` reads as `<hash>/<dir>/index.html`, as a site's own directory paths do. It goes
+    by the trailing `/` alone, without reading the manifest. The bundle root (`<hash>/`) stays as
+    it is.
+    """
+    _, sep, entry = rest.partition("/")
+    directory = sep != "" and entry != "" and entry.endswith("/")
+    return (f"{rest}index.html" if directory else rest), directory
+
+
+def _to_directory(uri: DecdnUri, search: str) -> httpx.Response:
+    """A redirect from entry `uri` to the directory it names, with the request's `search` kept.
+
+    The location is the entry's last path segment and a `/`, which resolves against the request
+    URL, so it holds on a site's own path and under `/_decdn/` alike.
+    """
+    link = format_uri(DecdnUri(hash=uri.hash, kind=uri.kind, path=uri.path))
+    return _response(302, None, {"location": f"{link.rsplit('/', 1)[-1]}/{search}"})
 
 
 def _hostname(origin: str) -> str:

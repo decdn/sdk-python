@@ -181,6 +181,8 @@ def fake(mode: Mode) -> tuple[FixtureFile, FakeGateway, Callable[[], None]]:
         "a.txt": b"hello from the sdk contract\n",
         "index.html": f'<a href="decdn:{blob}">blob</a>\n'.encode(),
         "data.bin": _bytes(256 * 1024, 0xDA7A),
+        # A directory: `docs/index.html`, and no `docs` entry.
+        "docs/index.html": b"<p>docs</p>\n",
     }
     manifest = gw.add_bundle(files)
     listener = gw.listen()

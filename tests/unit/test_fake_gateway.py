@@ -245,6 +245,11 @@ def test_loopback_browser_header_gate() -> None:
     h = fake.add_blob("hello")
     m = fake.add_bundle({"a.txt": "x"})
     site = f"http://{hash_to_base32(m.hash)}.localhost:8484"
+    with client(fake) as c:
+        # The gate refuses before anything pays: with no capability, a refused request is a 403.
+        r = c.get(f"{fake.url}/{h}", headers={"sec-fetch-site": "cross-site"})
+        assert (r.status_code, r.text) == (403, f"{CROSS_SITE}\n")
+        assert c.get(f"{fake.url}/{h}").status_code == 402
     fake.grant()
     with client(fake) as c:
         assert fake.url == "http://127.0.0.1:8484"
@@ -305,6 +310,46 @@ def test_loopback_pays_with_the_first_usable_capability_in_registration_order() 
         fake.cached.add(h)
         r = c.get(f"{fake.url}/{h}")
         assert (r.status_code, r.content) == (200, b"hello")
+
+
+def test_loopback_pays_a_namespace_with_a_capability_scoped_to_it_first() -> None:
+    fake = FakeGateway("loopback")
+    h = fake.add_blob("hello")
+    with client(fake) as c:
+        scoped = fake.grant("0x" + "01" * 32, namespaces=[7])
+        # A capability scoped to other namespaces pays for nothing else.
+        assert c.get(f"{fake.url}/{h}").status_code == 402
+        assert c.get(f"{fake.url}/{h}?ns=8").status_code == 402
+        assert c.get(f"{fake.url}/{h}?ns=7").content == b"hello"
+        # Registered after the unscoped one, the scoped one still pays first for its namespace: a
+        # funding stop on its pool retires it, and the unscoped one takes the request.
+        scoped.spent = False
+        anything = fake.grant("0x" + "02" * 32)
+        fake.capabilities.reverse()
+        fake.unfunded_pools.add(scoped.pool)
+        assert c.get(f"{fake.url}/{h}?ns=7").content == b"hello"
+        assert (scoped.spent, anything.spent) == (True, False)
+
+
+def test_public_pays_with_a_scoped_capability_only_where_its_pointer_serves() -> None:
+    fake = FakeGateway("public")
+    m = fake.add_bundle({"a.txt": "x"})
+    other = fake.add_blob("other")
+    fake.pointers[7] = m.hash
+    fake.grant(namespaces=[7])
+    label = hash_to_base32(m.hash)
+    page = {"sec-fetch-mode": "cors"}
+    with client(fake) as c:
+        assert c.get("http://7.decdn.test/a.txt").text == "x"
+        assert c.get(f"http://7.decdn.test/_decdn/{m.hash}/a.txt", headers=page).text == "x"
+        # The pointer's namespace pays for its own bundle alone, and only on its host.
+        for url in (
+            f"http://7.decdn.test/_decdn/{other}",
+            f"{fake.url}/{other}",
+            f"http://{label}.decdn.test/a.txt",
+            f"http://7.{label}.decdn.test/a.txt",
+        ):
+            assert c.get(url, headers=page).status_code == 503, url
 
 
 def test_public_nothing_pays_503_json_and_retry_after() -> None:
@@ -426,7 +471,6 @@ def test_register_422s() -> None:
         "example.com",
         None,
         {"namespaces": [], "signature": sig},
-        {"namespaces": [0], "signature": sig},
         {"namespaces": [2**64], "signature": sig},
         {"namespaces": [True], "signature": sig},
         {"namespaces": ["7"], "signature": sig},

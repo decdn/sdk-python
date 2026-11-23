@@ -197,8 +197,8 @@ class Registered:
 def _scope_namespaces(scope: Any) -> list[int] | None | Literal[False]:
     """The namespaces a well-formed scope names (`None` for `"any"`), or `False` for a malformed one.
 
-    A namespace scope is `{"namespaces", "signature"}`: at least one u64 namespace, each 1 or more,
-    and a 65-byte `0x` hex signature. The fake checks its shape alone, not who signed it.
+    A namespace scope is `{"namespaces", "signature"}`: at least one u64 namespace and a 65-byte
+    `0x` hex signature. The fake checks its shape alone, not who signed it.
     """
     if scope == "any":
         return None
@@ -208,7 +208,7 @@ def _scope_namespaces(scope: Any) -> list[int] | None | Literal[False]:
     signature = scope["signature"]
     if not isinstance(namespaces, list) or len(namespaces) == 0:
         return False
-    if not all(isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= _U64_MAX for n in namespaces):
+    if not all(isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= _U64_MAX for n in namespaces):
         return False
     if not isinstance(signature, str) or _SCOPE_SIGNATURE.fullmatch(signature) is None:
         return False
@@ -285,7 +285,7 @@ class FakeGateway:
         self.keys: set[str] = set()
         # The held key no capability claims yet, which `GET /_delegate` returns.
         self.pending: str | None = None
-        # Capabilities in registration order, the order the gateway pays with them.
+        # Capabilities in registration order: within a rank, the order the gateway pays with them.
         self.capabilities: list[Registered] = []
         # Pools, lowercase, whose pulls stop for funding: a capability from one is retired and the
         # next one pays.
@@ -342,9 +342,15 @@ class FakeGateway:
         signer: str = "0x" + "22" * 20,
         cap: int = 10_000_000,
         expiry: int = 1_900_000_000,
+        namespaces: list[int] | None = None,
     ) -> Registered:
-        """Hold a capability as if it were registered, after any the fake holds; return it."""
-        held = Registered(signer=signer.lower(), pool=pool.lower(), cap=cap, expiry=expiry)
+        """Hold a capability as if it were registered, after any the fake holds; return it.
+
+        `namespaces` scopes it to those namespaces; `None` is scope `"any"`.
+        """
+        held = Registered(
+            signer=signer.lower(), pool=pool.lower(), cap=cap, expiry=expiry, namespaces=namespaces
+        )
         self.keys.add(held.signer)
         self.capabilities.append(held)
         return held
@@ -466,23 +472,36 @@ class FakeGateway:
             },
         )
 
-    def _pay(self, uri: DecdnUri) -> httpx.Response | None:
+    def _pay(self, uri: DecdnUri, pointer: int | None = None) -> httpx.Response | None:
         """Pay the pull of `uri`: `None` when the cache holds it or a held capability pays.
 
-        The first capability not spent and outside the expiry margin pays. A funding stop on its
-        pool retires it, and the next one takes the request. When none can, the refusal.
+        `pointer` is the namespace whose pointer serves the request on a public gateway (`None`
+        for any other request); a loopback gateway goes by the namespace `uri` names. A funding
+        stop on the paying capability's pool retires it, and the next one takes the request. When
+        none can, the refusal.
         """
         if uri.kind == "blob" and uri.hash in self.cached:
             return None
-        deadline = int(time.time()) + EXPIRY_MARGIN_SECS
-        for held in self.capabilities:
-            if held.spent or held.expiry <= deadline:
-                continue
-            if held.pool in {p.lower() for p in self.unfunded_pools}:
-                held.spent = True
-                continue
-            return None
+        namespace = uri.namespace if self.mode == "loopback" else pointer
+        unfunded = {p.lower() for p in self.unfunded_pools}
+        while (held := self._paying(namespace)) is not None:
+            if held.pool not in unfunded:
+                return None
+            held.spent = True
         return self._cannot_pay(uri)
+
+    def _paying(self, namespace: int | None) -> Registered | None:
+        """The capability the next pull pays with, for a request of `namespace` (or `None`).
+
+        Among those not spent and outside the expiry margin: the earliest registered scoped to
+        `namespace`, else the earliest registered with scope `"any"`. A capability scoped to other
+        namespaces never pays.
+        """
+        deadline = int(time.time()) + EXPIRY_MARGIN_SECS
+        usable = [r for r in self.capabilities if not r.spent and r.expiry > deadline]
+        scoped = (r for r in usable if r.namespaces is not None and namespace in r.namespaces)
+        unscoped = (r for r in usable if r.namespaces is None)
+        return next(scoped, None) or next(unscoped, None)
 
     def _cannot_pay(self, uri: DecdnUri) -> httpx.Response:
         """The answer when nothing can pay for `uri`: 402 text (loopback) or 503 JSON (public)."""
@@ -525,8 +544,8 @@ class FakeGateway:
         method = req.method
         if self.mode == "public" and path == "/_pointer" and method == "PUT":
             return self._put_pointer(req)
-        # The API takes no token and no `Origin`. A loopback gateway answers nothing
-        # cross-origin; a public one answers its preflights in `_preflight`.
+        # A loopback gateway answers nothing cross-origin; a public one answers its preflights in
+        # `_preflight`.
         if method == "OPTIONS":
             return _text(403, "no cross-origin access\n")
         if path == "/_delegate" and method == "GET":
@@ -697,6 +716,8 @@ class FakeGateway:
                 uri = parse_uri(f"decdn:{rest}{search}")
             except DecdnError as e:
                 return _text(400, f"{e}\n")
+            # A capability scoped to the site's pointer pays for the pointer's own bundle alone.
+            pointer = site.pointer if uri.hash == site.hash else None
             # A request with no `Sec-Fetch-Mode` is taken as a navigation.
             navigation = req.headers.get("sec-fetch-mode", "navigate") == "navigate"
             if uri.kind != "blob" and (req.method == "HEAD" or navigation):
@@ -704,9 +725,9 @@ class FakeGateway:
                 # reading the manifest or paying for anything.
                 response = _response(302, None, {"location": self._site_location(uri, directory)})
             elif req.method == "HEAD":
-                response = self._head_blob(uri)
+                response = self._head_blob(uri, pointer)
             else:
-                response = self._serve(uri, "site", req.headers.get("range"), search)
+                response = self._serve(uri, "site", req.headers.get("range"), search, pointer)
         else:
             # The query belongs to the page's scripts: the gateway interprets none of it, and a
             # directory's redirect keeps it. A path ending in `/` serves its `index.html`.
@@ -720,7 +741,7 @@ class FakeGateway:
             response = (
                 self._head_site(uri, search)
                 if req.method == "HEAD"
-                else self._serve(uri, "site", req.headers.get("range"), search)
+                else self._serve(uri, "site", req.headers.get("range"), search, site.pointer)
             )
         response.headers["content-security-policy"] = _CSP
         return response
@@ -755,11 +776,11 @@ class FakeGateway:
             headers["accept-ranges"] = "bytes"
         return _response(200, None, headers)
 
-    def _head_blob(self, uri: DecdnUri) -> httpx.Response:
+    def _head_blob(self, uri: DecdnUri, pointer: int | None = None) -> httpx.Response:
         """`HEAD` of a raw blob on a public gateway.
 
         It is free for a blob whose size is proven, else refused or failed as its `GET` would be
-        before it pays for the size proof.
+        before it pays for the size proof. `pointer` is as `_pay` takes it.
         """
         headers = {
             "content-type": "application/octet-stream",
@@ -769,7 +790,7 @@ class FakeGateway:
         data = self.blobs.get(uri.hash)
         # The empty root is empty, with no proof.
         if uri.hash not in self._proven and (data is None or len(data) != 0):
-            refused = self._pay(uri)
+            refused = self._pay(uri, pointer)
             if refused is not None:
                 return refused
             if uri.hash in self.unfunded:
@@ -783,10 +804,18 @@ class FakeGateway:
         return _response(200, None, headers)
 
     def _serve(
-        self, uri: DecdnUri, present: Literal["bare", "site"], range_: str | None, search: str = ""
+        self,
+        uri: DecdnUri,
+        present: Literal["bare", "site"],
+        range_: str | None,
+        search: str = "",
+        pointer: int | None = None,
     ) -> httpx.Response:
-        """Serve `uri`; on a site, `search` is the request's query, which a directory's redirect keeps."""
-        refused = self._pay(uri)
+        """Serve `uri`; on a site, `search` is the request's query, which a directory's redirect keeps.
+
+        `pointer` is as `_pay` takes it.
+        """
+        refused = self._pay(uri, pointer)
         if refused is not None:
             return refused
         if uri.hash in self.unfunded:

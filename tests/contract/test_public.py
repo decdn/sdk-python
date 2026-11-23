@@ -182,11 +182,15 @@ if shipped_after("0.3.1"):  # decdn/decdn#2818
         # The gateway treats a request without `Sec-Fetch-Mode` as a navigation and redirects it
         # from `/_decdn/` to the bundle's site; these headers make it a page's own request.
         page_request = {"sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"}
-        for base, query in ((origin, "?tab=2"), (f"{origin}/_decdn/{c.bundle}", "?ns=7")):
+        decdn = f"{origin}/_decdn/{c.bundle}"
+        for base, query in ((origin, "?tab=2"), (decdn, "?ns=7")):
             for q in ("", query):
                 r = await c.fetch(flavour, f"{base}/docs{q}", headers=page_request)
                 assert r.status_code == 302, f"{base}/docs{q}"
                 assert r.headers.get("location") == f"docs/{q}"
+            # Under `/_decdn/`, `?ns=` routes the pull by a namespace the network need not
+            # serve, so the directory's index is fetched without it there.
+            for q in ("", query) if base == origin else ("",):
                 page = await c.fetch(flavour, f"{base}/docs/{q}", headers=page_request)
                 assert page.status_code == 200, f"{base}/docs/{q}"
                 assert page.content == index

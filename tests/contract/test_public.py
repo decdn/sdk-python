@@ -170,6 +170,33 @@ async def test_lets_any_origin_read_a_refusal(contract: Contract, flavour: Drive
     assert "Content-Range" in (r.headers.get("access-control-expose-headers") or "")
 
 
+if shipped_after("0.3.1"):  # decdn/decdn#2818
+
+    async def test_redirects_a_directory_and_serves_its_index_on_its_site_and_under_decdn(
+        contract: Contract, flavour: Driver, client: Driver
+    ) -> None:
+        c = contract
+        index = c.files["docs/index.html"]
+        site = httpx.URL(await client.site_url(f"decdn:{c.bundle}/"))
+        origin = f"{site.scheme}://{site.netloc.decode('ascii')}"
+        # A page's own request: the gateway takes a request without `Sec-Fetch-Mode` for a
+        # navigation, which `/_decdn/` redirects to the bundle's site.
+        page_request = {"sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"}
+        for base, query in ((origin, "?tab=2"), (f"{origin}/_decdn/{c.bundle}", "?ns=7")):
+            for q in ("", query):
+                r = await c.fetch(flavour, f"{base}/docs{q}", headers=page_request)
+                assert r.status_code == 302, f"{base}/docs{q}"
+                assert r.headers.get("location") == f"docs/{q}"
+                page = await c.fetch(flavour, f"{base}/docs/{q}", headers=page_request)
+                assert page.status_code == 200, f"{base}/docs/{q}"
+                assert page.content == index
+        head = await c.fetch(
+            flavour, f"{origin}/_decdn/{c.bundle}/docs/", method="HEAD", headers=page_request
+        )
+        assert head.status_code == 302
+        assert head.headers.get("location") == f"{origin}/docs/"
+
+
 async def test_refuses_an_unknown_host(contract: Contract, flavour: Driver) -> None:
     r = await contract.fetch(flavour, "http://evil.example/")
     assert r.status_code == 403

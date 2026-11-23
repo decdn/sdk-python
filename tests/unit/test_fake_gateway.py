@@ -162,6 +162,38 @@ def test_head_etag() -> None:
         assert (r.status_code, r.headers["allow"]) == (405, "GET")
 
 
+def test_site_directory_redirects_and_serves_its_index() -> None:
+    fake = FakeGateway("public")
+    m = fake.add_bundle({"docs/index.html": "<p>docs</p>", "a.txt": "x"})
+    site = f"http://{hash_to_base32(m.hash)}.decdn.test"
+    with client(fake) as c:
+        for base, q in ((site, "?tab=2"), (f"{site}/_decdn/{m.hash}", "?ns=7")):
+            r = c.get(f"{base}/docs{q}")
+            assert (r.status_code, r.headers["location"]) == (302, f"docs/{q}")
+            assert c.get(f"{base}/docs/{q}").text == "<p>docs</p>"
+        head = c.head(f"{site}/docs?tab=2")
+        assert (head.status_code, head.headers["location"]) == (302, "docs/?tab=2")
+        index = c.head(f"{site}/docs/")
+        assert (index.status_code, index.headers["etag"]) == (200, f'"{m.entries[0].hash}"')
+        # The bundle root under `/_decdn/` is not a directory in the bundle.
+        assert c.get(f"{site}/_decdn/{m.hash}/a.txt").text == "x"
+        assert c.get(f"{fake.url}/{m.hash}/docs", follow_redirects=False).status_code == 302
+
+
+def test_head_of_a_decdn_directory_redirects_to_its_site_at_no_pull() -> None:
+    fake = FakeGateway("public")
+    m = fake.add_bundle({"docs/index.html": "<p>docs</p>", "a.txt": "x"})
+    label = hash_to_base32(m.hash)
+    site = f"http://{label}.decdn.test"
+    allowance = fake.allowance
+    with client(fake) as c:
+        r = c.head(f"{site}/_decdn/{m.hash}/docs/?ns=7")
+        assert (r.status_code, r.headers["location"]) == (302, f"http://7.{label}.decdn.test/docs/")
+        entry = c.head(f"{site}/_decdn/{m.hash}/a.txt")
+        assert (entry.status_code, entry.headers["location"]) == (302, f"{site}/a.txt")
+    assert fake.allowance == allowance
+
+
 def test_unknown_host_403() -> None:
     fake = FakeGateway("public")
     with client(fake) as c:

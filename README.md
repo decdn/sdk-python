@@ -100,8 +100,11 @@ releases the SDK works against:
 - `gateway-floor` (`0.3.0`) is the oldest gateway whose HTTP contract the SDK
   supports, checked at release. It is the release that carries
   [cross-origin reads](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#cross-origin-reads),
-  which a public gateway needs. A loopback client speaks the pending-key
-  capability API, which decdn releases after 0.3.1 carry.
+  which a public gateway needs. That floor covers a public client alone: a
+  loopback client speaks the pending-key capability API and takes no token,
+  which only decdn releases after 0.3.1 carry, so against 0.3.0 or 0.3.1 every
+  loopback request fails with `HTTP` (the gateway's 401). The floor rises to the
+  first release that carries the API before the SDK's next release.
 - `harness-floor` is the first decdn release whose e2e harness runs this SDK's
   contract suite ([CONTRIBUTING.md](CONTRIBUTING.md#the-contract-suite-fake-and-real-gateway)).
   It is empty until that release exists: the released-gateway run starts with
@@ -138,7 +141,9 @@ async with AsyncClient("https://decdn.link") as client:
 ```
 
 A public gateway pays with the capabilities its operator registered on it, in
-the order they were registered. When none can pay, a request the gateway must
+the order they were registered; a capability scoped to namespaces pays only on
+the host of a namespace whose pointer serves the request
+([appendix-gateway § Scope](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#scope)). When none can pay, a request the gateway must
 pull fails with `PAYMENT_REQUIRED`, carrying `retry_after_secs` and the
 `fallback_uri` to fetch with a paying client of your own; a response its cache
 holds whole still comes, at no cost.
@@ -165,7 +170,7 @@ with Client("http://127.0.0.1:8484") as client:
 
 async with AsyncClient("http://127.0.0.1:8484") as client:
     delegate = await client.loopback.delegate()
-    scope = NamespaceScope(namespaces=[7, 9], signature="0x...")
+    scope = NamespaceScope(namespaces=(7, 9), signature="0x...")
     await client.loopback.register_capability("dcap1:...", scope)
     r = await client.get("decdn:<64 hex>?ns=7")
 ```
@@ -175,15 +180,17 @@ only for requests that name one of its namespaces (`?ns=<id>` in the `decdn:`
 URI, or a site host `<ns>.<label>.localhost`), and carries the pool owner's
 EIP-712 signature over `CapabilityScope(address signer,bytes32 poolId,uint256[] namespaces)`
 (domain `decdn-capability-scope`, version `1`, the chain id, and the
-PaymentPool as the verifying contract). The SDK sends the signature as given;
+PaymentPool as the verifying contract;
+[appendix-gateway § Scope](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#scope)). The SDK sends the signature as given;
 the gateway checks it and refuses a malformed scope or a signature that does
 not recover the pool's owner with `UNPROCESSABLE`. A request that names no
 namespace is paid only by `"any"` capabilities.
 
 A key holds one capability per pool, and capabilities from several pools.
-`client.loopback.capabilities()` lists what the gateway holds in the order it
-pays with them: a request goes to the first one that is not spent and not
-near its expiry. When none can pay, a request the gateway must pull fails with
+`client.loopback.capabilities()` lists what the gateway holds in registration
+order. A request goes to the first registered one that is not spent, not near
+its expiry, and scoped to the namespace it names; failing that, to the first
+such `"any"` one. When none can pay, a request the gateway must pull fails with
 `PAYMENT_REQUIRED`; a blob its cache holds whole still comes, at no cost. The
 gateway keeps keys and capabilities in memory, so after a restart you register
 again. A `dcap1:` token decodes offline with `parse_capability`.
@@ -194,8 +201,8 @@ with `FORBIDDEN`; the SDK sends no `Origin`, no `Sec-Fetch-*` headers and no
 browser user agent, so it is served.
 
 The SDK does not start the gateway. Run it yourself (`decdn gateway`, or the
-`decdn/decdn` Docker image). A `localhost`, `127.0.0.1` or `::1` URL opens a
-loopback client; a public gateway you run locally needs another host name,
+`decdn/decdn` Docker image). A `localhost` URL, or one on a loopback address
+(`127.0.0.0/8` or `::1`), opens a loopback client; a public gateway you run locally needs another host name,
 such as `decdn.localhost`.
 
 ## Verification
@@ -309,7 +316,7 @@ are the deployment the gateway verifies against.
 | `client.manifest(hash_or_uri)`                                                          | A bundle's verified manifest, cached per client                                                                                                                               |
 | `client.site_url(uri)`, `client.namespace_url(ns)`                                      | The site URL of a bundle or entry; the URL a namespace's pointer serves at (`https://<ns>.<host>/`). Neither makes a request                                                  |
 | `client.loopback.delegate()`                                                            | The loopback gateway's pending delegate key: the same address until a capability claims it                                                                                    |
-| `client.loopback.register_capability(capability, scope)`, `.capabilities()`             | Registers a `dcap1:` capability issued to a key the gateway holds, for scope `"any"` or a `NamespaceScope`; lists the capabilities the gateway holds, in the order it pays with them, with the `namespaces` of a scoped one |
+| `client.loopback.register_capability(capability, scope)`, `.capabilities()`             | Registers a `dcap1:` capability issued to a key the gateway holds, for scope `"any"` or a `NamespaceScope`; lists the capabilities the gateway holds, in registration order, with the `namespaces` of a scoped one |
 | `client.pointer.set(namespace=, root=, seq=, signer=)`                                  | Signs and publishes a namespace pointer on a public gateway                                                                                                                   |
 | `pointer_typed_data`, `pointer_signing_hash`, `sign_pointer`, `recover_pointer_signer`  | The pointer's EIP-712 typed data and signing hash, its signature, and the signer a signature recovers to                                                                      |
 | `parse_uri`, `format_uri`                                                               | Parse and canonically format a `decdn:` URI, following the Rust client's grammar exactly (`BAD_URI` on anything it refuses)                                                   |

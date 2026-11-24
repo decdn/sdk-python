@@ -3,6 +3,7 @@ runs this file with `DECDN_CONTRACT`:
 https://github.com/decdn/decdn/blob/main/crates/e2e/src/sdk_contract.rs
 """
 
+import re
 from collections.abc import Iterator
 
 import httpx
@@ -242,3 +243,58 @@ async def test_stores_a_pointer_the_namespaces_owner_signs_and_its_host_serves_t
         client.pointer_set(namespace=namespace, root=c.bundle, seq=set_.seq + 1, signer=f"0x{'33' * 32}"),
         "FORBIDDEN",
     )
+
+
+# A public gateway paid by capabilities alone, registered through the capability API on its bare
+# host: decdn/decdn's gateway after release 0.3.1. A released gateway up to 0.3.1 pays from its own
+# pool and has no API there, so it never collects these tests. decdn's harness registers one
+# capability before the suite runs.
+if shipped_after("0.3.1"):
+    _ANY_ORIGIN = {"origin": "https://app.example"}
+    _ENTRY_KEYS = ["cap", "expiry", "pool", "signer", "spent"]
+
+    async def test_answers_the_pending_key_on_the_bare_host_to_any_origin(
+        contract: Contract, flavour: Driver
+    ) -> None:
+        c = contract
+        r = await c.fetch(flavour, f"{c.gateway_url}/_delegate", headers=_ANY_ORIGIN)
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-origin") == "*"
+        address = r.json()["address"]
+        assert re.fullmatch(r"0x[0-9a-fA-F]{40}", address)
+        again = await c.fetch(flavour, f"{c.gateway_url}/_delegate", headers=_ANY_ORIGIN)
+        assert again.json()["address"] == address
+
+    async def test_lists_the_capabilities_it_pays_with_to_any_origin(
+        contract: Contract, flavour: Driver
+    ) -> None:
+        c = contract
+        r = await c.fetch(flavour, f"{c.gateway_url}/_capability", headers=_ANY_ORIGIN)
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-origin") == "*"
+        held = r.json()
+        assert len(held) >= 1
+        assert all(list(entry) == _ENTRY_KEYS for entry in held)
+        status = await c.fetch(flavour, f"{c.gateway_url}/_status", headers=_ANY_ORIGIN)
+        assert status.status_code == 200
+        body = status.json()
+        assert "allowance" not in body
+        assert all(list(entry) == _ENTRY_KEYS for entry in body["capabilities"])
+
+    async def test_answers_a_capability_preflight_on_the_bare_host_only(
+        contract: Contract, flavour: Driver, client: Driver
+    ) -> None:
+        c = contract
+        preflight = {
+            **_ANY_ORIGIN,
+            "access-control-request-method": "PUT",
+            "access-control-request-headers": "content-type",
+        }
+        bare = await c.fetch(flavour, f"{c.gateway_url}/_capability", method="OPTIONS", headers=preflight)
+        assert bare.status_code == 204
+        assert bare.headers.get("access-control-allow-origin") == "*"
+        site = httpx.URL(await client.site_url(f"decdn:{c.bundle}/"))
+        origin = f"{site.scheme}://{site.netloc.decode('ascii')}"
+        for path in ("/_delegate", "/_capability"):
+            off = await c.fetch(flavour, f"{origin}{path}")
+            assert off.status_code == 404, path

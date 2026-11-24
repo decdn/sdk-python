@@ -15,16 +15,16 @@ from decdn.errors import DecdnError
 from decdn.manifest import BundleManifest, ManifestEntry
 from decdn.response import ContentRange
 from decdn.uri import DecdnUri
-from tests.fake_gateway import FakeGateway
+from tests.fake_gateway import NO_CAPABILITY, FakeGateway
 from tests.support.flavour import Driver, rejects
 
 pytestmark = pytest.mark.anyio
 
-TOKEN = "cd" * 32
 
-
-def public_fake(allowance_bytes: int | None = None) -> tuple[FakeGateway, BundleManifest, str]:
-    fake = FakeGateway("public", allowance_bytes=allowance_bytes)
+def public_fake() -> tuple[FakeGateway, BundleManifest, str]:
+    """A public fake holding one capability, so its pulls are paid."""
+    fake = FakeGateway("public")
+    fake.grant()
     bundle = fake.add_bundle(
         {
             "a.txt": "abc",
@@ -106,18 +106,31 @@ def on_sleep(
 # DecdnClient.open
 
 
-async def test_picks_the_context_from_the_gateway_url_and_token(flavour: Driver) -> None:
+async def test_picks_the_context_from_the_gateway_url(flavour: Driver) -> None:
     fake, _, _ = public_fake()
     assert (await flavour.open(fake)).context == "public"
     loop = FakeGateway("loopback")
-    c = await flavour.open(gateway_url="http://127.0.0.1:8484", transport=loop.transport())
-    assert c.context == "loopback"
-    c = await flavour.open(gateway_url="https://gw.example", token=TOKEN, host="example.com")
-    assert c.context == "loopback"
+    for url in (
+        "http://127.0.0.1:8484",
+        "http://127.0.0.2:8484",
+        "http://localhost:8484",
+        "http://LOCALHOST:8484",
+        "http://[::1]:8484",
+        "http://[0:0:0:0:0:0:0:1]:8484",
+    ):
+        c = await flavour.open(gateway_url=url, transport=loop.transport())
+        assert c.context == "loopback", url
+    for url in (
+        "https://gw.example",
+        "http://decdn.localhost:8484",
+        "http://0.0.0.0:8484",
+        "http://[::ffff:127.0.0.1]:8484",
+        "http://128.0.0.1:8484",
+    ):
+        assert (await flavour.open(gateway_url=url)).context == "public", url
 
 
-async def test_refuses_a_token_without_a_host_and_no_gateway_outside_a_site_page(flavour: Driver) -> None:
-    await rejects(flavour.open(gateway_url="http://127.0.0.1:8484", token=TOKEN), "CONFIG")
+async def test_refuses_a_url_that_names_no_gateway(flavour: Driver) -> None:
     await rejects(flavour.open(gateway_url=""), "CONFIG")
     e = await rejects(flavour.open(gateway_url="not a url"), "CONFIG")
     assert str(e) == "not a gateway URL: not a url"
@@ -240,22 +253,50 @@ async def test_maps_a_range_past_the_end_to_range_not_satisfiable_with_the_size(
     assert e.status == 416
 
 
-async def test_maps_a_spent_allowance_to_payment_required_with_the_fallback_uri(flavour: Driver) -> None:
-    fake, _, blob = public_fake(0)
+async def test_maps_a_public_gateway_with_no_capability_to_payment_required_with_the_fallback_uri(
+    flavour: Driver,
+) -> None:
+    fake = FakeGateway("public")
+    blob = fake.add_blob("x")
     c = await flavour.open(fake)
     e = await rejects(c.get(f"decdn:{blob}?ns=7"), "PAYMENT_REQUIRED")
-    assert e.status == 402
+    assert e.status == 503
     assert e.fallback_uri == f"decdn:{blob}?ns=7"
-    assert e.retry_after_secs is not None and e.retry_after_secs > 0
+    assert e.retry_after_secs == 60
 
 
-async def test_maps_a_pool_that_cannot_pay_to_pool_unfunded(flavour: Driver) -> None:
+async def test_maps_a_pull_no_capability_can_pay_to_payment_required(flavour: Driver) -> None:
     fake, _, blob = public_fake()
     fake.unfunded.add(blob)
     c = await flavour.open(fake)
-    e = await rejects(c.get(f"decdn:{blob}"), "POOL_UNFUNDED")
+    e = await rejects(c.get(f"decdn:{blob}"), "PAYMENT_REQUIRED")
     assert e.retry_after_secs == 60
     assert e.fallback_uri == f"decdn:{blob}"
+
+
+async def test_reads_a_namespaced_uri_on_a_capability_scoped_to_its_namespace(flavour: Driver) -> None:
+    fake = FakeGateway("loopback")
+    bundle = fake.add_bundle({"a.txt": "x"})
+    fake.grant(namespaces=[7])
+    # Each call reads the manifest under the URI's namespace, so the scoped capability pays. A new
+    # client starts with an empty manifest cache.
+    manifest = f"{fake.url}/{bundle.hash}?ns=7"
+    for name, arg in (
+        ("manifest", f"decdn:{bundle.hash}?ns=7"),
+        ("resolve", f"decdn:{bundle.hash}/a.txt?ns=7"),
+        ("head", f"decdn:{bundle.hash}/a.txt?ns=7"),
+    ):
+        fake.seen.clear()
+        c = await flavour.open(fake)
+        await getattr(c, name)(arg)
+        assert manifest in [s.url for s in fake.seen], name
+    c = await flavour.open(fake)
+    r = await c.get(f"decdn:{bundle.hash}/a.txt?ns=7")
+    assert r.verified is True
+    assert await c.read(r) == b"x"
+    # Without the namespace, nothing can pay for the manifest.
+    c = await flavour.open(fake)
+    await rejects(c.get(f"decdn:{bundle.hash}/a.txt"), "PAYMENT_REQUIRED")
 
 
 async def test_retries_once_after_retry_after_when_asked(
@@ -272,18 +313,19 @@ async def test_retries_once_after_retry_after_when_asked(
 
 
 async def test_retry_cap_refuses_long_wait(flavour: Driver, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake, _, blob = public_fake(0)
-    monkeypatch.setattr(fake, "_seconds_to_midnight", lambda: 3600)
+    fake, _, blob = public_fake()
+    fake.unfunded.add(blob)
     waits = on_sleep(monkeypatch, flavour)
     c = await flavour.open(fake)
     e = await rejects(c.get(f"decdn:{blob}", retry=1.0), "PAYMENT_REQUIRED")
-    assert e.retry_after_secs == 3600
+    assert e.retry_after_secs == 60
     assert waits == []
     assert len(fake.seen) == 1
 
 
 async def test_a_ranged_request_answered_200_is_a_whole_body(flavour: Driver) -> None:
     fake = FakeGateway("public")
+    fake.grant()
     data = bytes(range(40))
     bundle = fake.add_bundle({"big.bin": data})
     fake.whole.add(entry_of(bundle, "big.bin").hash)
@@ -299,7 +341,7 @@ async def test_retry_never_sleeps_without_retry_after(
     flavour: Driver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for retry in (True, 5.0):
-        fake, _, blob = public_fake(0)
+        fake, _, blob = public_fake()
 
         def handle(request: httpx.Request, fake: FakeGateway = fake) -> httpx.Response:
             fake.handle(request)
@@ -381,7 +423,7 @@ async def test_fetches_an_entry_by_its_hash_when_its_site_serves_it_as(flavour: 
     assert await c.text(r) == "abc"
     entry = entry_of(bundle, "a.txt")
     assert paths(fake) == [
-        f"GET decdn.test/{bundle.hash}",
+        f"GET decdn.test/{bundle.hash}?ns=9",
         f"GET 9.{hash_to_base32(bundle.hash)}.decdn.test/a.txt",
         f"GET decdn.test/{entry.hash}?ns=9",
     ]
@@ -536,45 +578,37 @@ async def test_reads_a_raw_blobs_size_and_hash_from_head(flavour: Driver) -> Non
 
 
 async def test_maps_a_raw_blobs_head_refusals_as_its_gets(flavour: Driver) -> None:
-    fake, _, blob = public_fake(0)
+    fake = FakeGateway("public")
+    blob = fake.add_blob("x")
     c = await flavour.open(fake)
     await rejects(c.head(f"decdn:{blob}"), "PAYMENT_REQUIRED")
     funded, _, funded_blob = public_fake()
     funded.unfunded.add(funded_blob)
     d = await flavour.open(funded)
-    await rejects(d.head(f"decdn:{funded_blob}"), "POOL_UNFUNDED")
+    await rejects(d.head(f"decdn:{funded_blob}"), "PAYMENT_REQUIRED")
 
 
 def test_pays_a_raw_blobs_proof_once_under_a_sites_decdn_too() -> None:
-    fake, bundle, blob = public_fake(1 << 20)
+    fake, bundle, blob = public_fake()
     site = f"http://{hash_to_base32(bundle.hash)}.decdn.test"
     with httpx.Client(transport=fake.transport()) as http:
         for _ in range(2):
             r = http.head(f"{site}/_decdn/{blob}")
             assert r.status_code == 200
             assert r.headers.get("content-length") == "11"
-    assert fake.allowance == (1 << 20) - 16 * 1024
+            # A proven size answers with nothing that can pay.
+            fake.capabilities[0].spent = True
 
 
 async def test_answers_the_empty_blob_with_no_proof(flavour: Driver) -> None:
-    fake, _, _ = public_fake(1)
+    fake = FakeGateway("public")
     empty = fake.add_blob("")
     c = await flavour.open(fake)
     assert (await c.head(f"decdn:{empty}")).size == 0
+    fake.grant()
     r = await c.get(f"decdn:{empty}")
     assert r.content_length == 0
     assert await c.read(r) == b""
-    assert fake.allowance == 1
-
-
-def test_admits_a_window_of_a_raw_blob_by_its_chunk_group_span() -> None:
-    fake, _, _ = public_fake(32 * 1024)
-    big = fake.add_blob(bytes(64 * 1024))
-    with httpx.Client(transport=fake.transport()) as http:
-        r = http.get(f"http://decdn.test/{big}", headers={"range": "bytes=0-0"})
-    assert r.status_code == 206
-    assert r.headers.get("content-range") == f"bytes 0-0/{64 * 1024}"
-    assert fake.allowance == 0
 
 
 async def test_serves_a_bundle_as_its_site_index_unverified(flavour: Driver) -> None:
@@ -605,27 +639,26 @@ async def test_rejects_a_bad_uri_before_any_request(flavour: Driver) -> None:
 
 
 def loopback_fake() -> tuple[FakeGateway, BundleManifest, str]:
-    fake = FakeGateway("loopback", token=TOKEN)
+    fake = FakeGateway("loopback")
     bundle = fake.add_bundle({"a.txt": "abc", "index.html": "<p>x</p>"})
     blob = fake.add_blob("loop bytes")
-    fake.scopes.append("example.com")
+    fake.grant()
     return fake, bundle, blob
 
 
-async def open_loop(
-    flavour: Driver, fake: FakeGateway, token: str = TOKEN, host: str = "example.com", **kw: Any
-) -> Driver:
-    return await flavour.open(fake, token=token, host=host, **kw)
+async def open_loop(flavour: Driver, fake: FakeGateway, **kw: Any) -> Driver:
+    return await flavour.open(fake, **kw)
 
 
-async def test_sends_the_token_and_host_and_verifies_a_blob(flavour: Driver) -> None:
+async def test_sends_no_credentials_and_verifies_a_blob(flavour: Driver) -> None:
     fake, _, blob = loopback_fake()
     c = await open_loop(flavour, fake)
     r = await c.get(f"decdn:{blob}")
     assert r.verified is True
     assert await c.text(r) == "loop bytes"
-    assert fake.seen[0].headers.get("x-decdn-token") == TOKEN
-    assert fake.seen[0].headers.get("x-decdn-host") == "example.com"
+    for name in ("x-decdn-token", "x-decdn-host", "origin", "sec-fetch-site"):
+        assert fake.seen[0].headers.get(name) is None, name
+    assert not (fake.seen[0].headers.get("user-agent") or "").startswith("Mozilla/")
 
 
 async def test_fetches_an_entry_on_the_bare_host_byte_exact_and_verifies_it(flavour: Driver) -> None:
@@ -640,15 +673,11 @@ async def test_fetches_an_entry_on_the_bare_host_byte_exact_and_verifies_it(flav
     ]
 
 
-async def test_maps_a_wrong_token_to_unauthorized_and_an_uncovered_host_to_payment_required(
-    flavour: Driver,
-) -> None:
+async def test_maps_no_usable_capability_to_payment_required(flavour: Driver) -> None:
     fake, _, blob = loopback_fake()
-    await rejects((await open_loop(flavour, fake, "00" * 32)).get(f"decdn:{blob}"), "UNAUTHORIZED")
-    e = await rejects(
-        (await open_loop(flavour, fake, TOKEN, "other.org")).get(f"decdn:{blob}"), "PAYMENT_REQUIRED"
-    )
-    assert e.body == "no capability covers other.org"
+    fake.unfunded_pools.add(fake.capabilities[0].pool)
+    e = await rejects((await open_loop(flavour, fake)).get(f"decdn:{blob}"), "PAYMENT_REQUIRED")
+    assert e.body == NO_CAPABILITY
     assert e.fallback_uri is None
 
 

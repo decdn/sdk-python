@@ -46,8 +46,8 @@ the same shapes.
   itself verified and cached per client.
 - **Byte ranges** of sized entries, for large files such as model weights. A
   window does not hash to anything, so its `verified` is `"skipped"`.
-- **Loopback gateways.** Mint delegate keys and register capabilities on a
-  local `decdn gateway`.
+- **Loopback gateways.** Read the pending delegate key and register
+  capabilities on a local `decdn gateway`.
 - **Namespace pointers.** Point a `PublisherRegistry` namespace at a bundle on
   a public gateway, signing EIP-712 typed data with a private key or an
   `eth-account`-style `sign_typed_data` signer.
@@ -82,8 +82,8 @@ The client talks to one of two kinds of gateway:
 
 | Gateway                                                  | Where it runs                          | Who pays                                          |
 | -------------------------------------------------------- | -------------------------------------- | ------------------------------------------------- |
-| Public (`decdn gateway --public-url https://decdn.link`) | Anywhere with network access           | The operator's pool, within a daily allowance     |
-| Loopback (`decdn gateway`, `http://127.0.0.1:8484`)      | The same machine, with the gateway token | The capability registered for the requesting host |
+| Public (`decdn gateway --public-url https://decdn.link`) | Anywhere with network access           | The capabilities registered with the gateway      |
+| Loopback (`decdn gateway`, `http://127.0.0.1:8484`)      | The same machine, outside a browser      | The capabilities registered with the gateway      |
 
 The gateway's HTTP contract is
 [appendix-gateway](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md);
@@ -100,7 +100,11 @@ releases the SDK works against:
 - `gateway-floor` (`0.3.0`) is the oldest gateway whose HTTP contract the SDK
   supports, checked at release. It is the release that carries
   [cross-origin reads](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#cross-origin-reads),
-  which a public gateway needs; any loopback gateway works.
+  which a public gateway needs. That floor covers a public client alone: a
+  loopback client speaks the pending-key capability API and takes no token,
+  which only decdn releases after 0.3.1 carry, so against 0.3.0 or 0.3.1 every
+  loopback request fails with `HTTP` (the gateway's 401). The floor rises to the
+  first release that carries the API before the SDK's next release.
 - `harness-floor` is the first decdn release whose e2e harness runs this SDK's
   contract suite ([CONTRIBUTING.md](CONTRIBUTING.md#the-contract-suite-fake-and-real-gateway)).
   It is empty until that release exists: the released-gateway run starts with
@@ -136,44 +140,70 @@ async with AsyncClient("https://decdn.link") as client:
         ...
 ```
 
+A public gateway pays with the capabilities its operator registered on it, in
+the order they were registered; a capability scoped to namespaces pays only on
+the host of a namespace whose pointer serves the request
+([appendix-gateway § Scope](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#scope)). When none can pay, a request the gateway must
+pull fails with `PAYMENT_REQUIRED`, carrying `retry_after_secs` and the
+`fallback_uri` to fetch with a paying client of your own; a response its cache
+holds whole still comes, at no cost.
+
 `ByteRange` takes an `offset` and, optionally, a `length`. A response is a context manager
 too; leaving the block closes the connection if the body was not read.
 
 ## Loopback gateway
 
-A loopback gateway pays with a capability a pool owner issued to one of its
-delegate keys. Mint the delegate, have the owner assign it, and register it
-for the host your requests name:
+A loopback gateway pays with capabilities a pool owner issued to its delegate
+keys. The gateway holds one pending key: `delegate()` returns the same address
+until a capability claims it, and a fresh key after that. Have the owner
+assign the pending key, then register the capability with the scope it pays
+for:
 
 ```python
-from decdn import AsyncClient, Client
-from decdn.local import read_loopback_token
+from decdn import AsyncClient, Client, NamespaceScope
 
-with Client(
-    "http://127.0.0.1:8484",
-    token=read_loopback_token(),  # ~/.decdn/gateway/token
-    host="example.com",  # sent as x-decdn-host
-) as client:
+with Client("http://127.0.0.1:8484") as client:
     delegate = client.loopback.delegate()
     # The pool owner: decdn pool assign --pool <id> --signer <delegate.address> ...
-    client.loopback.register_capability(capability="dcap1:...", scope="example.com")
+    client.loopback.register_capability("dcap1:...", "any")
     r = client.get("decdn:<64 hex>")
 
-async with AsyncClient("http://127.0.0.1:8484", token=read_loopback_token(), host="example.com") as client:
+async with AsyncClient("http://127.0.0.1:8484") as client:
     delegate = await client.loopback.delegate()
-    await client.loopback.register_capability(capability="dcap1:...", scope="example.com")
-    r = await client.get("decdn:<64 hex>")
+    scope = NamespaceScope(namespaces=(7, 9), signature="0x...")
+    await client.loopback.register_capability("dcap1:...", scope)
+    r = await client.get("decdn:<64 hex>?ns=7")
 ```
 
-`client.loopback.capabilities()` lists what the gateway holds. Without a
-covering capability a request fails with `PAYMENT_REQUIRED`. A `dcap1:` token
-decodes offline with `parse_capability`.
+The scope is required. `"any"` pays for any content. A `NamespaceScope` pays
+only for requests that name one of its namespaces (`?ns=<id>` in the `decdn:`
+URI, or a site host `<ns>.<label>.localhost`), and carries the pool owner's
+EIP-712 signature over `CapabilityScope(address signer,bytes32 poolId,uint256[] namespaces)`
+(domain `decdn-capability-scope`, version `1`, the chain id, and the
+PaymentPool as the verifying contract;
+[appendix-gateway § Scope](https://github.com/decdn/decdn/blob/main/adr/appendix-gateway.md#scope)). The SDK sends the signature as given;
+the gateway checks it and refuses a malformed scope or a signature that does
+not recover the pool's owner with `UNPROCESSABLE`. A request that names no
+namespace is paid only by `"any"` capabilities.
+
+A key holds one capability per pool, and capabilities from several pools.
+`client.loopback.capabilities()` lists what the gateway holds in registration
+order. A request goes to the first registered one that is not spent, not near
+its expiry, and scoped to the namespace it names; failing that, to the first
+such `"any"` one. When none can pay, a request the gateway must pull fails with
+`PAYMENT_REQUIRED`; a blob its cache holds whole still comes, at no cost. The
+gateway keeps keys and capabilities in memory, so after a restart you register
+again. A `dcap1:` token decodes offline with `parse_capability`.
+
+A loopback gateway takes no credentials. It answers what runs outside a
+browser on the same machine and refuses a web page from another site or origin
+with `FORBIDDEN`; the SDK sends no `Origin`, no `Sec-Fetch-*` headers and no
+browser user agent, so it is served.
 
 The SDK does not start the gateway. Run it yourself (`decdn gateway`, or the
-`decdn/decdn` Docker image). A `localhost`, `127.0.0.1` or `::1` URL opens a
-loopback client; a public gateway you run locally needs another host name,
-such as `decdn.localhost`. `read_loopback_token(data_dir=None)` reads the
-token from the gateway's data dir (`default_data_dir()`, `~/.decdn/gateway`).
+`decdn/decdn` Docker image). A `localhost` URL, or one on a loopback address
+(`127.0.0.0/8` or `::1`), opens a loopback client; a public gateway you run locally needs another host name,
+such as `decdn.localhost`.
 
 ## Verification
 
@@ -204,11 +234,9 @@ Every failure is a `DecdnError` with a stable `code`:
 
 | Code                    | When                                                                                                |
 | ----------------------- | --------------------------------------------------------------------------------------------------- |
-| `PAYMENT_REQUIRED`      | 402: the allowance is spent, the entry does not fit what is left, or no capability covers the host  |
-| `POOL_UNFUNDED`         | 503: the gateway's pool cannot pay                                                                  |
+| `PAYMENT_REQUIRED`      | 402 (loopback) or 503 (public): no capability the gateway holds can pay                             |
 | `NOT_FOUND`             | 404                                                                                                 |
 | `RANGE_NOT_SATISFIABLE` | 416: the range starts past the end; `size` holds the entry's size                                   |
-| `UNAUTHORIZED`          | 401: the loopback token is missing or wrong                                                         |
 | `FORBIDDEN`             | 403                                                                                                 |
 | `BAD_URI`               | A `decdn:` URI that does not parse, or 400                                                          |
 | `RATE_LIMITED`          | 429                                                                                                 |
@@ -281,14 +309,14 @@ are the deployment the gateway verifies against.
 
 | Export                                                                                  | What it does                                                                                                                                                                  |
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Client(gateway_url, ...)`, `AsyncClient(gateway_url, ...)`                             | A client on a public or loopback gateway (`token`, `host`, `pointer`, `transport`, `verify`, `manifest_cache_size`, `timeout`); a context manager                              |
+| `Client(gateway_url, ...)`, `AsyncClient(gateway_url, ...)`                             | A client on a public or loopback gateway (`pointer`, `transport`, `verify`, `manifest_cache_size`, `timeout`); a context manager                              |
 | `client.get(uri, range=, verify=, retry=)`                                              | Fetches a blob, a bundle, a bundle entry or a range as a `Response` / `AsyncResponse` (`verified`, `iter_bytes`, `read`, `text`, `json`)                                      |
 | `client.head(uri)`                                                                      | The size, hash and content type of what a URI names, without its bytes                                                                                                        |
 | `client.resolve(uri)`                                                                   | A URI's kind, hash, bare and site URLs, and its manifest entry (reads the manifest for a bundle or entry)                                                                     |
 | `client.manifest(hash_or_uri)`                                                          | A bundle's verified manifest, cached per client                                                                                                                               |
 | `client.site_url(uri)`, `client.namespace_url(ns)`                                      | The site URL of a bundle or entry; the URL a namespace's pointer serves at (`https://<ns>.<host>/`). Neither makes a request                                                  |
-| `client.loopback.delegate()`                                                            | Mints a delegate key on a loopback gateway, held for 15 minutes unless a capability claims it                                                                                 |
-| `client.loopback.register_capability(capability=, scope=)`, `.capabilities()`           | Registers a `dcap1:` capability for a scope (`example.com`, `*.example.com` or `*`); lists the capabilities the gateway holds (needs the token)                               |
+| `client.loopback.delegate()`                                                            | The loopback gateway's pending delegate key: the same address until a capability claims it                                                                                    |
+| `client.loopback.register_capability(capability, scope)`, `.capabilities()`             | Registers a `dcap1:` capability issued to a key the gateway holds, for scope `"any"` or a `NamespaceScope`; lists the capabilities the gateway holds, in registration order, with the `namespaces` of a scoped one |
 | `client.pointer.set(namespace=, root=, seq=, signer=)`                                  | Signs and publishes a namespace pointer on a public gateway                                                                                                                   |
 | `pointer_typed_data`, `pointer_signing_hash`, `sign_pointer`, `recover_pointer_signer`  | The pointer's EIP-712 typed data and signing hash, its signature, and the signer a signature recovers to                                                                      |
 | `parse_uri`, `format_uri`                                                               | Parse and canonically format a `decdn:` URI, following the Rust client's grammar exactly (`BAD_URI` on anything it refuses)                                                   |
@@ -296,7 +324,6 @@ are the deployment the gateway verifies against.
 | `blake3_hex`, `create_blake3`                                                           | BLAKE3, one-shot and incremental                                                                                                                                              |
 | `parse_manifest`, `parse_capability`                                                    | Decodes a v1 bundle manifest, checking its hash when given one; decodes a `dcap1:` token without checking its signature                                                       |
 | `DecdnError`                                                                            | Every failure, with a stable `code` ([Errors](#errors))                                                                                                                       |
-| `read_loopback_token`, `default_data_dir`                                               | From `decdn.local`: the loopback gateway's token and data dir (`~/.decdn/gateway`)                                                                                            |
 
 Namespaces, sequence numbers, caps and expiries are `int`.
 

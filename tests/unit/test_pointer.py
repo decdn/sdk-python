@@ -1,3 +1,4 @@
+import json
 import time
 
 import httpx
@@ -9,6 +10,7 @@ from decdn.pointer import (
     PointerDomain,
     PointerSet,
     PointerTypedData,
+    _pointer_set,
     pointer_signing_hash,
     pointer_typed_data,
     recover_pointer_signer,
@@ -94,6 +96,7 @@ def test_recover_rejects_high_s_and_bad_v() -> None:
 
 def gateway() -> FakeGateway:
     fake = FakeGateway("public")
+    fake.grant()
     fake.pointer_domain = domain
     fake.owners[pointer.namespace] = fixture["address"].lower()
     return fake
@@ -187,3 +190,19 @@ async def test_defaults_seq_to_the_current_unix_second(flavour: Driver) -> None:
     before = int(time.time())
     done = await c.pointer_set(namespace=7, root=bundle.hash, signer=fixture["privateKey"])
     assert before <= done.seq <= before + 2
+
+
+def test_reads_a_pointer_answer_with_exact_integer_fields_only() -> None:
+    good = {"namespace": 2**64 - 1, "root": "0x" + "ab" * 32, "seq": 2**63, "url": "http://x/"}
+    assert _pointer_set(json.dumps(good).encode()).namespace == 2**64 - 1
+    for bad in (
+        {**good, "namespace": 7.0},
+        {**good, "seq": 1.5},
+        {**good, "seq": "1"},
+        {**good, "namespace": 2**64},
+        {**good, "root": 7},
+        {**good, "url": None},
+    ):
+        with pytest.raises(DecdnError) as e:
+            _pointer_set(json.dumps(bad).encode())
+        assert e.value.code == "HTTP", bad

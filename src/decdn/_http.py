@@ -4,15 +4,17 @@ JSON body, the 416 size, the pointer 409 `seq`)."""
 
 import json
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import httpx
 
 from decdn.errors import DecdnError, ErrorCode
 
+_T = TypeVar("_T")
+
 CODES: dict[int, ErrorCode] = {
     400: "BAD_URI",
-    401: "UNAUTHORIZED",
     402: "PAYMENT_REQUIRED",
     403: "FORBIDDEN",
     404: "NOT_FOUND",
@@ -22,7 +24,7 @@ CODES: dict[int, ErrorCode] = {
     422: "UNPROCESSABLE",
     429: "RATE_LIMITED",
     502: "UPSTREAM",
-    503: "POOL_UNFUNDED",
+    503: "PAYMENT_REQUIRED",
 }
 
 _LINK = re.compile(r'<(decdn:[^>]+)>\s*;\s*rel="?alternate"?')
@@ -34,6 +36,50 @@ _RANGE_SIZE = re.compile(r"bytes \*/([0-9]+)")
 def is_success(status: int) -> bool:
     """Return whether `status` is a 2xx answer."""
     return 200 <= status <= 299
+
+
+def read_json(path: str, body: bytes, read: Callable[[Any], _T]) -> _T:
+    """Return what `read` makes of the JSON body of the gateway's success answer to `path`.
+
+    A body that is not JSON, or JSON `read` cannot take (a field missing or of the wrong type),
+    raises `HTTP`: the gateway answered outside its contract.
+    """
+    try:
+        return read(json.loads(body))
+    except (ValueError, KeyError, TypeError, RecursionError) as e:
+        raise DecdnError(
+            "HTTP",
+            f"the gateway's answer to {path} is not the JSON its contract names: {e!r}",
+            body=body.decode("utf-8", errors="replace"),
+        ) from e
+
+
+_U64_MAX = 2**64 - 1
+
+
+def text_field(value: Any, name: str) -> str:
+    """Return `value`, a JSON answer's string field `name`; `TypeError` for any other type."""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} is not a string: {value!r}")
+    return value
+
+
+def u64_field(value: Any, name: str) -> int:
+    """Return `value`, a JSON answer's u64 field `name`; `TypeError` for anything else.
+
+    `json` reads an integer without a fraction or exponent as an exact `int`, so a `float` here is
+    no u64.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _U64_MAX:
+        raise TypeError(f"{name} is not a u64: {value!r}")
+    return value
+
+
+def bool_field(value: Any, name: str) -> bool:
+    """Return `value`, a JSON answer's boolean field `name`; `TypeError` for any other type."""
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} is not a boolean: {value!r}")
+    return value
 
 
 def network_error(url: str, exc: Exception) -> DecdnError:

@@ -5,6 +5,7 @@ Nothing here touches the network. `Client` and `AsyncClient` parse, plan with th
 and hand the answer back to it.
 """
 
+import ipaddress
 import json
 import re
 from collections import OrderedDict
@@ -23,7 +24,7 @@ from decdn.pointer import PointerDomain
 from decdn.uri import SCHEME, DecdnUri, UriKind, format_uri, parse_uri
 
 Context = Literal["public", "loopback"]
-"""Where the client reaches the gateway: a public gateway, or the local one with its token."""
+"""Where the client reaches the gateway: a public gateway, or the local one on a loopback address."""
 
 VerifyMode = Literal["auto"] | bool
 """`"auto"` verifies what can be verified; `True` refuses what cannot; `False` verifies nothing."""
@@ -32,8 +33,7 @@ Verified = bool | Literal["skipped"]
 
 _DIGITS = re.compile(r"[0-9]+")
 _ETAG = re.compile(r'"?([0-9a-fA-F]{64})"?')
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
-_RETRYABLE = frozenset({"PAYMENT_REQUIRED", "POOL_UNFUNDED", "RATE_LIMITED"})
+_RETRYABLE = frozenset({"PAYMENT_REQUIRED", "RATE_LIMITED"})
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,20 @@ def retry_wait(error: DecdnError, retry: bool | float) -> int | None:
     return error.retry_after_secs
 
 
+def _is_loopback(hostname: str) -> bool:
+    """Whether `hostname` names a loopback gateway: `localhost`, or an address the gateway counts
+    as loopback (`127.0.0.0/8` or `::1`; an IPv4-mapped address is not one)."""
+    if hostname == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return False
+    return address.is_loopback
+
+
 class Core:
     """A client's configuration, its manifest cache, and everything it decides without I/O."""
 
@@ -133,8 +147,6 @@ class Core:
         self,
         gateway_url: str,
         *,
-        token: str | None,
-        host: str | None,
         pointer: PointerDomain | None,
         verify: VerifyMode,
         manifest_cache_size: int,
@@ -147,19 +159,13 @@ class Core:
         if gateway.scheme == "" or gateway.raw_host == b"" or (port is not None and not 0 <= port <= 65535):
             raise config(f"not a gateway URL: {gateway_url}")
         hostname = gateway.raw_host.decode("ascii")
-        self.context: Context = "loopback" if token is not None or hostname in _LOOPBACK_HOSTS else "public"
-        if token is not None and (host is None or host == ""):
-            raise config(
-                "a loopback token needs `host`: the host whose capability pays, sent as x-decdn-host"
-            )
+        self.context: Context = "loopback" if _is_loopback(hostname) else "public"
         self.scheme = gateway.scheme
         self.port = port
         bracketed = f"[{hostname}]" if ":" in hostname else hostname
         # `host[:port]` of the gateway, the port only when it is not the scheme's default.
         self.authority = bracketed if port is None else f"{bracketed}:{port}"
         self.origin = f"{self.scheme}://{self.authority}"
-        self.token = token
-        self.host = host
         self.pointer = pointer
         self.verify: VerifyMode = verify
         self.cache_size = manifest_cache_size
@@ -178,16 +184,6 @@ class Core:
         self.manifests.move_to_end(hash)
         while len(self.manifests) > self.cache_size:
             self.manifests.popitem(last=False)
-
-    def auth_headers(self) -> dict[str, str]:
-        """Return the headers every bare-host request carries."""
-        if self.token is None or self.host is None:
-            return {}
-        return {"x-decdn-token": self.token, "x-decdn-host": self.host}
-
-    def is_bare(self, url: str) -> bool:
-        """Return whether `url` is on the gateway's bare host."""
-        return url.startswith(f"{self.origin}/")
 
     def bare_url(self, uri: DecdnUri) -> str:
         """Return the URI on the bare host."""
@@ -216,13 +212,18 @@ class Core:
             raise config("a loopback gateway holds no namespace pointers")
         return f"{self.scheme}://{namespace}.{self.authority}/"
 
-    def manifest_hash(self, hash_or_uri: str | DecdnUri | None) -> str:
-        """Return the hash a manifest call names."""
+    def manifest_uri(self, hash_or_uri: str | DecdnUri | None) -> DecdnUri:
+        """Return the blob a manifest call reads: the manifest's hash, with the URI's namespace.
+
+        A loopback gateway pays for a pull with a capability scoped to the request's namespace, so
+        the manifest of a namespaced URI is read under that namespace too.
+        """
         if hash_or_uri is None:
             raise config("manifest needs a hash outside a site page")
         if isinstance(hash_or_uri, str) and is_hash(hash_or_uri):
-            return hash_or_uri.lower()
-        return parse(hash_or_uri).hash
+            return DecdnUri(hash=hash_or_uri.lower(), kind="blob")
+        u = parse(hash_or_uri)
+        return DecdnUri(hash=u.hash, kind="blob", namespace=u.namespace)
 
     def entry_blob_url(self, uri: DecdnUri, entry: ManifestEntry) -> str:
         """Return an entry by its own hash, as a blob: the bytes the manifest names, unrewritten."""

@@ -1,9 +1,9 @@
 """The clients: `Client` and `AsyncClient`, one of two contexts over a `decdn gateway`.
 
 - `public`: a gateway with `--public-url`; blobs from the bare host, entries from their site
-  host, every request paid by the operator.
-- `loopback`: the local gateway with its token; every request on the bare host, paid by the
-  capability that covers `host`.
+  host, every request paid with the capabilities the gateway holds.
+- `loopback`: the local gateway on a loopback address; every request on the bare host, paid with
+  the capabilities the gateway holds.
 
 Both clients plan with the same sans-I/O core and differ only in how they send.
 """
@@ -55,8 +55,8 @@ MAX_RETRY_WAIT_SECS = 86_400
 class Client:
     """A synchronous client over a gateway.
 
-    `token` and `host` open the loopback gateway; so does a gateway on `127.0.0.1`, `localhost`
-    or `::1`. `transport` stands in for the network (an `httpx.MockTransport` in tests).
+    A gateway on `localhost` or a loopback address (`127.0.0.0/8`, `::1`) is the loopback gateway;
+    any other is a public one. `transport` stands in for the network (an `httpx.MockTransport` in tests).
     A `Client` is not safe for concurrent use from several threads.
     """
 
@@ -64,8 +64,6 @@ class Client:
         self,
         gateway_url: str,
         *,
-        token: str | None = None,
-        host: str | None = None,
         pointer: PointerDomain | None = None,
         transport: httpx.BaseTransport | None = None,
         verify: VerifyMode = "auto",
@@ -74,8 +72,6 @@ class Client:
     ) -> None:
         self._core = Core(
             gateway_url,
-            token=token,
-            host=host,
             pointer=pointer,
             verify=verify,
             manifest_cache_size=manifest_cache_size,
@@ -88,7 +84,7 @@ class Client:
         self.pointer: PointerApi = PointerApi(self)
         # The delegate and capability API (loopback gateway).
         self.loopback: LoopbackApi = LoopbackApi(self)
-        # A loopback request carries the token: it never goes through a proxy from the environment.
+        # A loopback request never goes through a proxy from the environment.
         self._http = httpx.Client(
             transport=transport,
             timeout=timeout,
@@ -100,8 +96,7 @@ class Client:
         self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
     ) -> httpx.Response:
         """Send a streamed request; a non-2xx answer is raised as a `DecdnError`."""
-        sent = {**self._core.auth_headers(), **headers} if self._core.is_bare(url) else headers
-        request = self._http.build_request(method, url, headers=sent, content=content)
+        request = self._http.build_request(method, url, headers=headers, content=content)
         try:
             response = self._http.send(request, stream=True)
         except httpx.HTTPError as e:
@@ -138,12 +133,16 @@ class Client:
         return self._core.namespace_url(namespace)
 
     def manifest(self, hash_or_uri: str | DecdnUri | None = None) -> BundleManifest:
-        """Return the bundle manifest a hash or URI names, parsed and verified; cached by hash."""
-        hash_ = self._core.manifest_hash(hash_or_uri)
+        """Return the bundle manifest a hash or URI names, parsed and verified; cached by hash.
+
+        A URI's namespace goes with the read, so a capability scoped to it can pay.
+        """
+        blob = self._core.manifest_uri(hash_or_uri)
+        hash_ = blob.hash
         cached = self._core.cache_get(hash_)
         if cached is not None:
             return cached
-        raw = self._send(self._core.bare_url(DecdnUri(hash=hash_, kind="blob")), "GET", {})
+        raw = self._send(self._core.bare_url(blob), "GET", {})
         try:
             data = collect(guard(raw.iter_bytes(), GuardOptions()), MAX_MANIFEST_BYTES)
         finally:
@@ -153,7 +152,7 @@ class Client:
         return manifest
 
     def _entry_of(self, uri: DecdnUri) -> ManifestEntry:
-        return entry_of(self.manifest(uri.hash), uri)
+        return entry_of(self.manifest(uri), uri)
 
     def resolve(self, uri: str | DecdnUri) -> Resolved:
         """Return what `uri` names: for a bundle or an entry, after reading its manifest."""
@@ -163,7 +162,7 @@ class Client:
             return Resolved(kind=u.kind, hash=u.hash, bare_url=bare_url)
         site_url = self._core.site_url(u)
         if u.kind == "bundle":
-            self.manifest(u.hash)
+            self.manifest(u)
             return Resolved(kind=u.kind, hash=u.hash, bare_url=bare_url, site_url=site_url)
         entry = self._entry_of(u)
         return Resolved(kind=u.kind, hash=u.hash, bare_url=bare_url, entry=entry, site_url=site_url)
@@ -244,8 +243,6 @@ class AsyncClient:
         self,
         gateway_url: str,
         *,
-        token: str | None = None,
-        host: str | None = None,
         pointer: PointerDomain | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         verify: VerifyMode = "auto",
@@ -254,8 +251,6 @@ class AsyncClient:
     ) -> None:
         self._core = Core(
             gateway_url,
-            token=token,
-            host=host,
             pointer=pointer,
             verify=verify,
             manifest_cache_size=manifest_cache_size,
@@ -268,7 +263,7 @@ class AsyncClient:
         self.pointer: AsyncPointerApi = AsyncPointerApi(self)
         # The delegate and capability API (loopback gateway).
         self.loopback: AsyncLoopbackApi = AsyncLoopbackApi(self)
-        # A loopback request carries the token: it never goes through a proxy from the environment.
+        # A loopback request never goes through a proxy from the environment.
         self._http = httpx.AsyncClient(
             transport=transport,
             timeout=timeout,
@@ -276,14 +271,13 @@ class AsyncClient:
             trust_env=self.context != "loopback",
         )
         # Manifest reads in flight, by hash: every caller of one hash awaits the same read.
-        self._pending: dict[str, asyncio.Task[BundleManifest]] = {}
+        self._pending: dict[tuple[str, int | None], asyncio.Task[BundleManifest]] = {}
 
     async def _send(
         self, url: str, method: str, headers: dict[str, str], *, content: bytes | None = None
     ) -> httpx.Response:
         """Send a streamed request; a non-2xx answer is raised as a `DecdnError`."""
-        sent = {**self._core.auth_headers(), **headers} if self._core.is_bare(url) else headers
-        request = self._http.build_request(method, url, headers=sent, content=content)
+        request = self._http.build_request(method, url, headers=headers, content=content)
         try:
             response = await self._http.send(request, stream=True)
         except httpx.HTTPError as e:
@@ -320,22 +314,29 @@ class AsyncClient:
         return self._core.namespace_url(namespace)
 
     async def manifest(self, hash_or_uri: str | DecdnUri | None = None) -> BundleManifest:
-        """Return the bundle manifest a hash or URI names, parsed and verified; cached by hash."""
-        hash_ = self._core.manifest_hash(hash_or_uri)
-        cached = self._core.cache_get(hash_)
+        """Return the bundle manifest a hash or URI names, parsed and verified; cached by hash.
+
+        A URI's namespace goes with the read, so a capability scoped to it can pay. Concurrent reads
+        of one manifest under one namespace share a single request.
+        """
+        blob = self._core.manifest_uri(hash_or_uri)
+        cached = self._core.cache_get(blob.hash)
         if cached is not None:
             return cached
-        pending = self._pending.get(hash_)
+        key = (blob.hash, blob.namespace)
+        pending = self._pending.get(key)
         if pending is None:
-            pending = asyncio.ensure_future(self._read_manifest(hash_))
-            self._pending[hash_] = pending
+            pending = asyncio.ensure_future(self._read_manifest(blob))
+            self._pending[key] = pending
         # A caller cancelled while it waits stops waiting; the read goes on for the others.
         return await asyncio.shield(pending)
 
-    async def _read_manifest(self, hash_: str) -> BundleManifest:
-        """Read, verify and cache the manifest of `hash_`: the one read every waiter shares."""
+    async def _read_manifest(self, blob: DecdnUri) -> BundleManifest:
+        """Read, verify and cache the manifest `blob` names: the one read every waiter shares."""
+        hash_ = blob.hash
+        key = (hash_, blob.namespace)
         try:
-            raw = await self._send(self._core.bare_url(DecdnUri(hash=hash_, kind="blob")), "GET", {})
+            raw = await self._send(self._core.bare_url(blob), "GET", {})
             try:
                 data = await acollect(aguard(raw.aiter_bytes(), GuardOptions()), MAX_MANIFEST_BYTES)
             finally:
@@ -345,11 +346,11 @@ class AsyncClient:
             return manifest
         finally:
             # This read drops its own entry only: the hash's slot may hold a newer read.
-            if self._pending.get(hash_) is asyncio.current_task():
-                del self._pending[hash_]
+            if self._pending.get(key) is asyncio.current_task():
+                del self._pending[key]
 
     async def _entry_of(self, uri: DecdnUri) -> ManifestEntry:
-        return entry_of(await self.manifest(uri.hash), uri)
+        return entry_of(await self.manifest(uri), uri)
 
     async def resolve(self, uri: str | DecdnUri) -> Resolved:
         """Return what `uri` names: for a bundle or an entry, after reading its manifest."""
@@ -359,7 +360,7 @@ class AsyncClient:
             return Resolved(kind=u.kind, hash=u.hash, bare_url=bare_url)
         site_url = self._core.site_url(u)
         if u.kind == "bundle":
-            await self.manifest(u.hash)
+            await self.manifest(u)
             return Resolved(kind=u.kind, hash=u.hash, bare_url=bare_url, site_url=site_url)
         entry = await self._entry_of(u)
         return Resolved(kind=u.kind, hash=u.hash, bare_url=bare_url, entry=entry, site_url=site_url)

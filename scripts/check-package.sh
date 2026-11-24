@@ -17,7 +17,7 @@ uv venv "$tmp/venv" >/dev/null 2>&1
 uv pip install --python "$tmp/venv/bin/python" "$tmp"/dist/*.whl >/dev/null 2>&1
 echo "ok: installed the wheel into a fresh venv"
 
-version="$("$tmp/venv/bin/python" -c "import decdn, decdn.local; decdn.Client; print(decdn.__version__)")"
+version="$("$tmp/venv/bin/python" -c "import decdn, decdn.loopback; decdn.Client; print(decdn.__version__)")"
 echo "ok: imported decdn $version"
 
 if ! python3 -m zipfile -l "$tmp"/dist/*.whl | grep -q "decdn/py.typed"; then

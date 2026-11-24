@@ -29,8 +29,10 @@ from decdn.hashing import (
 )
 from decdn.loopback import (
     AsyncLoopbackApi,
+    CapabilityScope,
     Delegate,
     LoopbackApi,
+    NamespaceScope,
     RegisteredCapability,
     Registration,
 )
@@ -93,8 +95,10 @@ __all__ = [
     "create_blake3",
     # loopback
     "AsyncLoopbackApi",
+    "CapabilityScope",
     "Delegate",
     "LoopbackApi",
+    "NamespaceScope",
     "RegisteredCapability",
     "Registration",
     # manifest

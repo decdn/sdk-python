@@ -75,7 +75,8 @@ _POINTER_BODY = re.compile(
     r'\s*"seq"\s*:\s*([0-9]+)\s*,\s*"signature"\s*:\s*"(0x[0-9a-fA-F]*)"\s*\}\s*'
 )
 _DECDN_REF = re.compile(r"decdn:([0-9a-fA-F]{64})")
-_SCOPE_SIGNATURE = re.compile(r"0x[0-9a-fA-F]{130}")
+_SCOPE_SIGNATURE = re.compile(r"(?:0x)?(?:[0-9a-fA-F]{2})*")
+_SIGNATURE_BYTES = 65
 _U64_MAX = 2**64 - 1
 _CSP = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; connect-src 'self'"
 
@@ -197,8 +198,10 @@ class Registered:
 def _scope_namespaces(scope: Any) -> list[int] | None | Literal[False]:
     """The namespaces a well-formed scope names (`None` for `"any"`), or `False` for a malformed one.
 
-    A namespace scope is `{"namespaces", "signature"}`: at least one u64 namespace and a 65-byte
-    `0x` hex signature. The fake checks its shape alone, not who signed it.
+    A namespace scope is `{"namespaces", "signature"}`: at least one u64 namespace and a signature
+    of hex bytes, `0x` optional. The register handler checks the signature's length after the key
+    and pool checks, as the gateway checks the signature itself there; the fake never checks who
+    signed it.
     """
     if scope == "any":
         return None
@@ -438,10 +441,17 @@ class FakeGateway:
     def _gate(self, req: httpx.Request) -> httpx.Response | None:
         """The loopback browser-header gate every request passes: `None` to go on, else the 403.
 
-        A page on another site or origin, or a request that looks like a browser (an `Origin`, or a
-        `Mozilla/` user agent) but sends no `Sec-Fetch-Site`, is refused; a client outside a browser
-        goes on.
+        A top-level `GET` navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`) goes on
+        from anywhere. Otherwise a page on another site or origin, or a request that looks like a
+        browser (an `Origin`, or a `Mozilla/` user agent) but sends no `Sec-Fetch-Site`, is refused;
+        a client outside a browser goes on.
         """
+        if (
+            req.method == "GET"
+            and req.headers.get("sec-fetch-mode") == "navigate"
+            and req.headers.get("sec-fetch-dest") == "document"
+        ):
+            return None
         fetch_site = req.headers.get("sec-fetch-site")
         if fetch_site == "cross-site":
             return _text(403, f"{CROSS_SITE}\n")
@@ -616,6 +626,9 @@ class FakeGateway:
                 409,
                 "that key already holds a capability from this pool: get a new key from GET /_delegate\n",
             )
+        signature = request["scope"]["signature"] if namespaces is not None else ""
+        if namespaces is not None and len(signature.removeprefix("0x")) != 2 * _SIGNATURE_BYTES:
+            return _text(422, "the scope signature is malformed\n")
         self.capabilities.append(
             Registered(
                 signer=signer,
@@ -700,14 +713,19 @@ class FakeGateway:
             return _text(405, "", {"allow": "GET"})
         if req.method not in ("GET", "HEAD"):
             return _text(405, "method not allowed\n")
-        # A site spends only for its own pages, the user and a top-level navigation.
+        # A site spends only for its own pages, the user and a top-level navigation: one that loads
+        # a whole page (`Sec-Fetch-Dest: document`), not a frame. A request with no `Sec-Fetch-Mode`
+        # is taken as a navigation.
         fetch_site = req.headers.get("sec-fetch-site")
-        navigate = req.headers.get("sec-fetch-mode") == "navigate"
+        top_level = (
+            req.headers.get("sec-fetch-mode", "navigate") == "navigate"
+            and req.headers.get("sec-fetch-dest") == "document"
+        )
         if (
             self.mode == "loopback"
             and fetch_site is not None
             and fetch_site not in ("same-origin", "none")
-            and not navigate
+            and not top_level
         ):
             return _text(403, "a site answers only its own pages and top-level navigation\n")
         if path.startswith("/_decdn/"):

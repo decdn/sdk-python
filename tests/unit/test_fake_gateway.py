@@ -273,11 +273,34 @@ def test_loopback_browser_header_gate() -> None:
         for other in ("http://localhost:9999", "https://127.0.0.1:8484", "null", f"http://x.{site[7:]}"):
             r = c.get(f"{fake.url}/{h}", headers={"origin": other, "sec-fetch-site": "same-site"})
             assert r.text == f"{CROSS_ORIGIN}\n", other
+        # A top-level GET navigation passes the gate from any site; a frame, a HEAD or a fetch does not.
+        page = {"sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document"}
+        for url in (f"{fake.url}/{h}", f"{site}/a.txt"):
+            assert c.get(url, headers=page).status_code == 200, url
+            assert (
+                c.get(url, headers={**page, "user-agent": "Mozilla/5.0", "origin": "null"}).status_code == 200
+            )
+            r = c.get(url, headers={**page, "sec-fetch-dest": "iframe"})
+            assert (r.status_code, r.text) == (403, f"{CROSS_SITE}\n"), url
+            r = c.head(url, headers=page)
+            assert r.status_code == 403, url
         # A site spends only for its own pages, the user and a top-level navigation.
-        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-site"}).status_code == 403
-        same = {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate"}
-        assert c.get(f"{site}/a.txt", headers=same).text == "x"
-        assert c.get(f"{site}/a.txt", headers={"sec-fetch-site": "same-origin"}).text == "x"
+        refused = "a site answers only its own pages and top-level navigation\n"
+        for headers in (
+            {"sec-fetch-site": "same-site"},
+            {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate"},
+            {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe"},
+            {"sec-fetch-site": "same-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "document"},
+        ):
+            r = c.get(f"{site}/a.txt", headers=headers)
+            assert (r.status_code, r.text) == (403, refused), headers
+        for headers in (
+            {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document"},
+            {"sec-fetch-site": "same-site", "sec-fetch-dest": "document"},
+            {"sec-fetch-site": "same-origin"},
+            {"sec-fetch-site": "none"},
+        ):
+            assert c.get(f"{site}/a.txt", headers=headers).text == "x", headers
         # A navigation to a bundle on the bare host goes to its site; anything else is served there.
         r = c.get(
             f"{fake.url}/{m.hash}/a.txt", headers={"sec-fetch-mode": "navigate", "sec-fetch-site": "none"}
@@ -474,8 +497,9 @@ def test_register_422s() -> None:
         {"namespaces": [2**64], "signature": sig},
         {"namespaces": [True], "signature": sig},
         {"namespaces": ["7"], "signature": sig},
-        {"namespaces": [7], "signature": "0x" + "ab" * 64},
-        {"namespaces": [7], "signature": "ab" * 65},
+        {"namespaces": [7], "signature": "0xabc"},
+        {"namespaces": [7], "signature": "0xzz"},
+        {"namespaces": [7], "signature": 7},
         {"namespaces": [7]},
         {"namespaces": [7], "signature": sig, "extra": 1},
     ):
@@ -492,6 +516,31 @@ def test_register_422s() -> None:
     assert (r.status_code, r.text) == (422, "the capability expires inside the expiry margin\n")
     assert put(json.dumps({"capability": cap["token"] + " " * 70_000, "scope": "any"})).status_code == 413
     assert fake.capabilities == []
+
+
+def test_register_checks_a_scope_signatures_length_after_the_key_and_pool() -> None:
+    cap = fixture_json("capability")
+    fake = FakeGateway("loopback")
+    short = {"namespaces": [7], "signature": "0x" + "ab" * 64}
+
+    def put(capability: str, scope: object) -> httpx.Response:
+        with client(fake) as c:
+            return c.put(
+                f"{fake.url}/_capability", content=json.dumps({"capability": capability, "scope": scope})
+            )
+
+    # A key the gateway does not hold: 409 before the signature is read.
+    assert put(cap["token"], short).status_code == 409
+    fake.pend(cap["signer"])
+    r = put(cap["token"], short)
+    assert (r.status_code, r.text) == (422, "the scope signature is malformed\n")
+    assert put(cap["token"], "any").status_code == 201
+    # A pool the key already holds: 409 before the signature is read.
+    assert put(cap["token"], short).status_code == 409
+    # Hex with no `0x` is a signature too.
+    r = put(issue(cap, pool="0x" + "c4" * 32), {"namespaces": [7], "signature": "ab" * 65})
+    assert r.status_code == 201
+    assert len(fake.capabilities) == 2
 
 
 def test_loopback_answers_no_preflight() -> None:

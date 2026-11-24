@@ -416,6 +416,8 @@ def test_public_capability_api_on_the_bare_host() -> None:
         preflight = c.options(f"{fake.url}/_capability")
         assert preflight.status_code == 204
         assert preflight.headers["access-control-allow-methods"] == "GET, PUT"
+        for path in ("/_delegate", "/_status"):
+            assert c.options(f"{fake.url}{path}").headers["access-control-allow-methods"] == "GET", path
         site = f"http://{hash_to_base32('ab' * 32)}.decdn.test"
         for path in ("/_delegate", "/_capability", "/_status"):
             assert c.get(f"{site}{path}").status_code == 404

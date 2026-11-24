@@ -274,6 +274,31 @@ async def test_maps_a_pull_no_capability_can_pay_to_payment_required(flavour: Dr
     assert e.fallback_uri == f"decdn:{blob}"
 
 
+async def test_reads_a_namespaced_uri_on_a_capability_scoped_to_its_namespace(flavour: Driver) -> None:
+    fake = FakeGateway("loopback")
+    bundle = fake.add_bundle({"a.txt": "x"})
+    fake.grant(namespaces=[7])
+    # Each call reads the manifest under the URI's namespace, so the scoped capability pays. A new
+    # client starts with an empty manifest cache.
+    manifest = f"{fake.url}/{bundle.hash}?ns=7"
+    for name, arg in (
+        ("manifest", f"decdn:{bundle.hash}?ns=7"),
+        ("resolve", f"decdn:{bundle.hash}/a.txt?ns=7"),
+        ("head", f"decdn:{bundle.hash}/a.txt?ns=7"),
+    ):
+        fake.seen.clear()
+        c = await flavour.open(fake)
+        await getattr(c, name)(arg)
+        assert manifest in [s.url for s in fake.seen], name
+    c = await flavour.open(fake)
+    r = await c.get(f"decdn:{bundle.hash}/a.txt?ns=7")
+    assert r.verified is True
+    assert await c.read(r) == b"x"
+    # Without the namespace, nothing can pay for the manifest.
+    c = await flavour.open(fake)
+    await rejects(c.get(f"decdn:{bundle.hash}/a.txt"), "PAYMENT_REQUIRED")
+
+
 async def test_retries_once_after_retry_after_when_asked(
     flavour: Driver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -398,7 +423,7 @@ async def test_fetches_an_entry_by_its_hash_when_its_site_serves_it_as(flavour: 
     assert await c.text(r) == "abc"
     entry = entry_of(bundle, "a.txt")
     assert paths(fake) == [
-        f"GET decdn.test/{bundle.hash}",
+        f"GET decdn.test/{bundle.hash}?ns=9",
         f"GET 9.{hash_to_base32(bundle.hash)}.decdn.test/a.txt",
         f"GET decdn.test/{entry.hash}?ns=9",
     ]

@@ -212,13 +212,18 @@ class Core:
             raise config("a loopback gateway holds no namespace pointers")
         return f"{self.scheme}://{namespace}.{self.authority}/"
 
-    def manifest_hash(self, hash_or_uri: str | DecdnUri | None) -> str:
-        """Return the hash a manifest call names."""
+    def manifest_uri(self, hash_or_uri: str | DecdnUri | None) -> DecdnUri:
+        """Return the blob a manifest call reads: the manifest's hash, with the URI's namespace.
+
+        A loopback gateway pays for a pull with a capability scoped to the request's namespace, so
+        the manifest of a namespaced URI is read under that namespace too.
+        """
         if hash_or_uri is None:
             raise config("manifest needs a hash outside a site page")
         if isinstance(hash_or_uri, str) and is_hash(hash_or_uri):
-            return hash_or_uri.lower()
-        return parse(hash_or_uri).hash
+            return DecdnUri(hash=hash_or_uri.lower(), kind="blob")
+        u = parse(hash_or_uri)
+        return DecdnUri(hash=u.hash, kind="blob", namespace=u.namespace)
 
     def entry_blob_url(self, uri: DecdnUri, entry: ManifestEntry) -> str:
         """Return an entry by its own hash, as a blob: the bytes the manifest names, unrewritten."""

@@ -468,8 +468,10 @@ class FakeGateway:
             return _text(404, "the gateway API answers on the gateway origin only\n")
         if path == "/_pointer":
             methods, headers = "PUT", "content-type"
-        elif path in API:
+        elif path == "/_capability":
             methods, headers = "GET, PUT", "content-type"
+        elif path in API:
+            methods, headers = "GET", "content-type"
         else:
             methods, headers = "GET, HEAD", "range"
         return _text(

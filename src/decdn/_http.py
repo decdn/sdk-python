@@ -54,6 +54,34 @@ def read_json(path: str, body: bytes, read: Callable[[Any], _T]) -> _T:
         ) from e
 
 
+_U64_MAX = 2**64 - 1
+
+
+def text_field(value: Any, name: str) -> str:
+    """Return `value`, a JSON answer's string field `name`; `TypeError` for any other type."""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} is not a string: {value!r}")
+    return value
+
+
+def u64_field(value: Any, name: str) -> int:
+    """Return `value`, a JSON answer's u64 field `name`; `TypeError` for anything else.
+
+    `json` reads an integer without a fraction or exponent as an exact `int`, so a `float` here is
+    no u64.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _U64_MAX:
+        raise TypeError(f"{name} is not a u64: {value!r}")
+    return value
+
+
+def bool_field(value: Any, name: str) -> bool:
+    """Return `value`, a JSON answer's boolean field `name`; `TypeError` for any other type."""
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} is not a boolean: {value!r}")
+    return value
+
+
 def network_error(url: str, exc: Exception) -> DecdnError:
     """Return the `NETWORK` error for a failure to reach the gateway at `url`.
 

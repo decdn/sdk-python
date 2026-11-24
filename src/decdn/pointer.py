@@ -17,7 +17,7 @@ import coincurve
 from Crypto.Hash import keccak
 
 from decdn._hex import from_hex, is_hash, to_hex
-from decdn._http import read_json
+from decdn._http import read_json, text_field, u64_field
 from decdn.errors import DecdnError
 from decdn.uri import SCHEME, parse_uri
 
@@ -305,7 +305,12 @@ def _pointer_set(body: bytes) -> PointerSet:
     return read_json(
         "/_pointer",
         body,
-        lambda p: PointerSet(namespace=p["namespace"], root=p["root"], seq=p["seq"], url=p["url"]),
+        lambda p: PointerSet(
+            namespace=u64_field(p["namespace"], "namespace"),
+            root=text_field(p["root"], "root"),
+            seq=u64_field(p["seq"], "seq"),
+            url=text_field(p["url"], "url"),
+        ),
     )
 
 

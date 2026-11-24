@@ -121,6 +121,29 @@ async def test_raises_http_for_an_answer_outside_the_contract(flavour: Driver) -
         ),
         ("/_capability", b"{}", c.loopback_capabilities),
         ("/_capability", json.dumps([{**held, "namespaces": 7}]).encode(), c.loopback_capabilities),
+        # Fields of the wrong type.
+        ("/_delegate", b'{"address":42}', c.loopback_delegate),
+        ("/_delegate", b"[]", c.loopback_delegate),
+        (
+            "/_capability",
+            json.dumps({**signer, "expiry": "1"}).encode(),
+            lambda: c.loopback_register(capability["token"], "any"),
+        ),
+        (
+            "/_capability",
+            json.dumps({**signer, "expiry": 1.5}).encode(),
+            lambda: c.loopback_register(capability["token"], "any"),
+        ),
+        (
+            "/_capability",
+            json.dumps({**signer, "namespaces": [2**64]}).encode(),
+            lambda: c.loopback_register(capability["token"], "any"),
+        ),
+        ("/_capability", json.dumps([{**held, "spent": "false"}]).encode(), c.loopback_capabilities),
+        ("/_capability", json.dumps([{**held, "cap": -1}]).encode(), c.loopback_capabilities),
+        ("/_capability", json.dumps([{**held, "cap": True}]).encode(), c.loopback_capabilities),
+        ("/_capability", json.dumps([{**held, "pool": 7}]).encode(), c.loopback_capabilities),
+        ("/_capability", b'["x"]', c.loopback_capabilities),
     ):
         bodies[path] = body
         e = await rejects(call(), "HTTP")

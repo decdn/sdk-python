@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from decdn._http import read_json
+from decdn._http import bool_field, read_json, text_field, u64_field
 from decdn.errors import DecdnError
 
 if TYPE_CHECKING:
@@ -100,16 +100,16 @@ def _registration_body(capability: str, scope: CapabilityScope) -> bytes:
 
 
 def _namespaces(value: Any) -> tuple[int, ...] | None:
-    """A listing's `namespaces`: absent (`None`) for scope `"any"`, else a list of integers."""
+    """A listing's `namespaces`: absent (`None`) for scope `"any"`, else a list of u64s."""
     if value is None:
         return None
-    if not isinstance(value, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in value):
-        raise TypeError(f"namespaces is not a list of integers: {value!r}")
-    return tuple(value)
+    if not isinstance(value, list):
+        raise TypeError(f"namespaces is not a list: {value!r}")
+    return tuple(u64_field(n, "a namespace") for n in value)
 
 
 def _delegate(data: bytes) -> Delegate:
-    return read_json("/_delegate", data, lambda p: Delegate(address=p["address"]))
+    return read_json("/_delegate", data, lambda p: Delegate(address=text_field(p["address"], "address")))
 
 
 def _registration(data: bytes) -> Registration:
@@ -117,9 +117,9 @@ def _registration(data: bytes) -> Registration:
         "/_capability",
         data,
         lambda p: Registration(
-            signer=p["signer"],
-            pool=p["pool"],
-            expiry=p["expiry"],
+            signer=text_field(p["signer"], "signer"),
+            pool=text_field(p["pool"], "pool"),
+            expiry=u64_field(p["expiry"], "expiry"),
             namespaces=_namespaces(p.get("namespaces")),
         ),
     )
@@ -131,11 +131,11 @@ def _capabilities(data: bytes) -> list[RegisteredCapability]:
             raise TypeError(f"expected a list, not {type(items).__name__}")
         return [
             RegisteredCapability(
-                signer=i["signer"],
-                pool=i["pool"],
-                cap=i["cap"],
-                expiry=i["expiry"],
-                spent=i["spent"],
+                signer=text_field(i["signer"], "signer"),
+                pool=text_field(i["pool"], "pool"),
+                cap=u64_field(i["cap"], "cap"),
+                expiry=u64_field(i["expiry"], "expiry"),
+                spent=bool_field(i["spent"], "spent"),
                 namespaces=_namespaces(i.get("namespaces")),
             )
             for i in items
